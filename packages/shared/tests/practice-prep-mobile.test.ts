@@ -160,3 +160,39 @@ describe('practice room rejoin after empty', () => {
     expect(join.state.humans).toEqual(['new']);
   });
 });
+
+describe('AI count = rabbit users × 5', () => {
+  it('practice solo spawns 5 AI and stays playing after ticks', () => {
+    let lobby = createLobby('solo-p', defaultConfig());
+    const joined = joinHuman(lobby, 'only', 'Solo');
+    expect(joined.ok).toBe(true);
+    if (!joined.ok) return;
+    let state = startPracticeMatch(joined.state, 1);
+    expect(state.mode).toBe('practice');
+    expect(state.seekerId).toBeNull();
+    expect(state.phase).toBe('playing');
+    const ais = Object.values(state.entities).filter((e) => e.kind === 'ai');
+    expect(ais).toHaveLength(5); // 1 rabbit user × 5
+    expect(state.config.aiCount).toBe(5);
+    // solo practice must not end after many ticks
+    for (let i = 0; i < 40; i++) {
+      state = tickTimer(state, 250);
+    }
+    expect(state.phase).toBe('playing');
+    expect(state.mode).toBe('practice');
+  });
+
+  it('normal match AI count is (humans - seeker) × 5', () => {
+    let lobby = createLobby('n', defaultConfig());
+    for (const id of ['a', 'b', 'c']) {
+      const r = joinHuman(lobby, id, id);
+      expect(r.ok).toBe(true);
+      if (r.ok) lobby = r.state;
+    }
+    const state = startMatch(lobby, { mode: 'normal', seed: 1 });
+    const ais = Object.values(state.entities).filter((e) => e.kind === 'ai');
+    // 3 humans → 1 seeker + 2 rabbits → 10 AI
+    expect(ais).toHaveLength(10);
+    expect(state.config.aiCount).toBe(10);
+  });
+});

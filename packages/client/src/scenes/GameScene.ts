@@ -42,7 +42,11 @@ export class GameScene extends Phaser.Scene {
 
   init(data: GameSceneData): void {
     this.playMode = data.mode === 'practice' ? 'practice' : 'normal';
-    this.roomId = this.playMode === 'practice' ? 'practice' : 'lobby';
+    // Unique practice room so solo practice never collides with others / leftover state
+    this.roomId =
+      this.playMode === 'practice'
+        ? `practice-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+        : 'lobby';
     this.autoStarted = false;
     this.frozenOthers.clear();
   }
@@ -124,15 +128,17 @@ export class GameScene extends Phaser.Scene {
     this.client.onSnapshot = (state, you) => {
       this.you = you;
       this.state = state;
-      // Auto-start practice once in lobby
-      if (
-        this.playMode === 'practice' &&
-        !this.autoStarted &&
-        state.phase === 'lobby' &&
-        state.humans.includes(you)
-      ) {
-        this.autoStarted = true;
-        this.client.sendIntent({ type: 'start', mode: 'practice' });
+      // Auto-start practice once in lobby (retry until playing — avoid start-before-join race)
+      if (this.playMode === 'practice') {
+        if (state.phase === 'playing' && state.mode === 'practice') {
+          this.autoStarted = true;
+        } else if (
+          !this.autoStarted &&
+          state.phase === 'lobby' &&
+          state.humans.includes(you)
+        ) {
+          this.client.sendIntent({ type: 'start', mode: 'practice' });
+        }
       }
       this.syncSprites(state, you);
       this.updateCameraFollow(you, state);
@@ -306,7 +312,8 @@ export class GameScene extends Phaser.Scene {
       `You: ${role}${state.seekerId === you ? ' (여우 술래)' : me?.kind === 'human' ? ' (토끼)' : ''}`,
     ];
     if (state.mode === 'practice') {
-      lines.push('AI 토끼 움직임 연습 · 술래 없음 · 잡기 없음');
+      const aiN = Object.values(state.entities).filter((e) => e.kind === 'ai').length;
+      lines.push(`AI 토끼 ${aiN}마리 연습 · 술래 없음 · 혼자 가능`);
     } else {
       lines.push(`Time ${sec}s | Catches ${state.catchBudgetRemaining}`);
       if (isSeekerPrepActive(state) && state.seekerId === you) {

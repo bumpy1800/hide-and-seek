@@ -157,12 +157,19 @@ export function leaveHuman(state: MatchState, playerId: string): MatchState {
   return next;
 }
 
+/** AI rabbits = human rabbit (hider) players × 5. Seeker is excluded. */
+export function aiCountForRabbitUsers(rabbitUserCount: number): number {
+  return Math.max(0, Math.floor(rabbitUserCount)) * 5;
+}
+
 function spawnAiCrowd(
   config: MatchConfig,
   rng: () => number,
+  aiCount?: number,
 ): Record<string, EntityState> {
+  const count = aiCount ?? config.aiCount;
   const entities: Record<string, EntityState> = {};
-  for (let i = 0; i < config.aiCount; i++) {
+  for (let i = 0; i < count; i++) {
     const id = `ai-${i}`;
     entities[id] = {
       id,
@@ -210,7 +217,9 @@ export function startMatch(state: MatchState, seedOrOpts: number | StartOptions 
 
   const rng = createRng(seed);
   const seekerId = pickRandom(current.humans, rng);
-  const entities: Record<string, EntityState> = { ...spawnAiCrowd(current.config, rng) };
+  const rabbitUsers = Math.max(0, current.humans.length - 1);
+  const aiN = aiCountForRabbitUsers(rabbitUsers);
+  const entities: Record<string, EntityState> = { ...spawnAiCrowd(current.config, rng, aiN) };
 
   for (const id of current.humans) {
     const prev = current.entities[id]!;
@@ -237,6 +246,7 @@ export function startMatch(state: MatchState, seedOrOpts: number | StartOptions 
     phase: 'playing',
     mode: 'normal',
     seekerId,
+    config: { ...current.config, aiCount: aiN },
     entities,
     catchBudgetRemaining: current.config.catchBudget,
     timeRemainingMs: current.config.timeLimitMs,
@@ -264,7 +274,10 @@ export function startPracticeMatch(state: MatchState, seed: number = Date.now())
   }
 
   const rng = createRng(seed);
-  const entities: Record<string, EntityState> = { ...spawnAiCrowd(current.config, rng) };
+  // Solo practice allowed: all joined humans are rabbits (no seeker)
+  const rabbitUsers = current.humans.length;
+  const aiN = aiCountForRabbitUsers(rabbitUsers);
+  const entities: Record<string, EntityState> = { ...spawnAiCrowd(current.config, rng, aiN) };
 
   for (const id of current.humans) {
     const prev = current.entities[id]!;
@@ -284,6 +297,7 @@ export function startPracticeMatch(state: MatchState, seed: number = Date.now())
     phase: 'playing',
     mode: 'practice',
     seekerId: null,
+    config: { ...current.config, aiCount: aiN },
     entities,
     catchBudgetRemaining: current.config.catchBudget,
     timeRemainingMs: current.config.timeLimitMs,

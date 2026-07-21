@@ -38,10 +38,14 @@ describe('expanded meadow map bounds', () => {
   });
 
   it('spawns AI inside expanded meadow', () => {
-    let state = createLobby('ai-bounds', defaultConfig({ aiCount: 5 }));
-    const joined = joinHuman(state, 'p1', 'P');
+    let state = createLobby('ai-bounds', defaultConfig());
+    let joined = joinHuman(state, 'p1', 'P');
     expect(joined.ok).toBe(true);
     if (!joined.ok) return;
+    joined = joinHuman(joined.state, 'p2', 'Q');
+    expect(joined.ok).toBe(true);
+    if (!joined.ok) return;
+    // 2 humans → 1 seeker + 1 rabbit → 5 AI
     state = startMatch(joined.state, 42);
     const ais = Object.values(state.entities).filter((e) => e.kind === 'ai');
     expect(ais.length).toBe(5);
