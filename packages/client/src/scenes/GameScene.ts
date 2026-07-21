@@ -10,6 +10,7 @@ import {
   type MatchState,
   facingFromVelocity,
   facingTransform,
+  baseHeadingForTexture,
   type Facing,
 } from '@hide-and-seek/shared';
 import { IntentInput } from '../input/IntentInput';
@@ -346,7 +347,8 @@ export class GameScene extends Phaser.Scene {
       const prevFace = this.lastFacing.get(e.id) ?? 'down';
       const face = facingFromVelocity(display.vx, display.vy, prevFace);
       this.lastFacing.set(e.id, face);
-      const xf = facingTransform(face);
+      // Rabbit art faces up; fox art faces left — use texture-specific base heading
+      const xf = facingTransform(face, baseHeadingForTexture(tex));
       spr.setFlipX(xf.flipX);
       spr.setFlipY(xf.flipY);
       spr.setAngle(xf.angle);
