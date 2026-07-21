@@ -162,3 +162,27 @@ describe('practice and seeker prep on room host', () => {
     expect(before.id).toBe(sid);
   });
 });
+
+describe('practice rejoin after disconnect', () => {
+  it('allows a second player to join practice room after the first leaves', () => {
+    const manager = new RoomManager();
+    const a = new FakeSocket();
+    manager.joinRoom('practice', 'solo1', a, 'S1');
+    const room = manager.get('practice')!;
+    room.applyIntent('solo1', { type: 'start', mode: 'practice' });
+    expect(room.state.phase).toBe('playing');
+    room.leave('solo1');
+    expect(room.state.phase).toBe('lobby');
+    expect(room.state.humans).toHaveLength(0);
+
+    const b = new FakeSocket();
+    const joined = manager.joinRoom('practice', 'solo2', b, 'S2');
+    expect(joined.message.type).toBe('welcome');
+    expect(room.state.phase).toBe('lobby');
+    expect(room.state.humans).toContain('solo2');
+    room.applyIntent('solo2', { type: 'start', mode: 'practice' });
+    expect(room.state.phase).toBe('playing');
+    expect(room.state.mode).toBe('practice');
+    expect(room.state.seekerId).toBeNull();
+  });
+});

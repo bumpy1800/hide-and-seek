@@ -93,6 +93,10 @@ export function joinHuman(
   spawn?: { x: number; y: number },
 ): JoinResult {
   let current = state;
+  // Recover empty / abandoned sessions (e.g. practice never ended after disconnect).
+  if (current.humans.length === 0 && current.phase !== 'lobby') {
+    current = createLobby(current.roomId, current.config);
+  }
   if (current.phase === 'ended') {
     current = returnToLobby(current);
   }
@@ -143,6 +147,10 @@ export function leaveHuman(state: MatchState, playerId: string): MatchState {
     humans: state.humans.filter((id) => id !== playerId),
     entities,
   };
+  // Empty room must return to lobby so practice/normal can be rejoined after disconnect.
+  if (next.humans.length === 0) {
+    return createLobby(state.roomId, state.config);
+  }
   if (next.phase === 'playing' && next.mode !== 'practice') {
     return evaluateEndConditions(next);
   }
@@ -380,6 +388,9 @@ export function tickTimer(state: MatchState, dtMs: number): MatchState {
 
   // Practice: no timed win/lose — just tick for AI stepping
   if (state.mode === 'practice') {
+    if (state.humans.length === 0) {
+      return createLobby(state.roomId, state.config);
+    }
     return { ...state, tick: state.tick + 1 };
   }
 

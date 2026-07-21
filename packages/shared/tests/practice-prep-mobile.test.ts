@@ -8,6 +8,7 @@ import {
   defaultConfig,
   isSeekerPrepActive,
   joinHuman,
+  leaveHuman,
   setEntityVelocity,
   shouldShowMobileKeypad,
   startMatch,
@@ -114,5 +115,48 @@ describe('seeker prep (~10s)', () => {
     const miss = attemptCatch(state, seekerId, aiId);
     expect(miss.ok).toBe(false);
     if (!miss.ok) expect(miss.reason).toBe('target_is_ai');
+  });
+});
+
+describe('practice room rejoin after empty', () => {
+  it('returns to lobby when last human leaves practice so a second join works', () => {
+    let lobby = createLobby('practice', defaultConfig({ aiCount: 2 }));
+    let res = joinHuman(lobby, 'p1', 'One');
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    let state = startPracticeMatch(res.state, 1);
+    expect(state.phase).toBe('playing');
+    expect(state.mode).toBe('practice');
+
+    state = leaveHuman(state, 'p1');
+    expect(state.phase).toBe('lobby');
+    expect(state.humans).toHaveLength(0);
+    expect(state.mode).toBe('normal');
+
+    const again = joinHuman(state, 'p2', 'Two');
+    expect(again.ok).toBe(true);
+    if (!again.ok) return;
+    expect(again.state.phase).toBe('lobby');
+    expect(again.state.humans).toContain('p2');
+
+    const practice2 = startPracticeMatch(again.state, 2);
+    expect(practice2.phase).toBe('playing');
+    expect(practice2.seekerId).toBeNull();
+  });
+
+  it('join recovers abandoned playing room with zero humans', () => {
+    let lobby = createLobby('practice', defaultConfig({ aiCount: 1 }));
+    let res = joinHuman(lobby, 'ghost', 'G');
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    let state = startPracticeMatch(res.state, 9);
+    // Simulate corrupt empty playing state without leaveHuman
+    state = { ...state, humans: [], entities: {} };
+    expect(state.phase).toBe('playing');
+    const join = joinHuman(state, 'new', 'N');
+    expect(join.ok).toBe(true);
+    if (!join.ok) return;
+    expect(join.state.phase).toBe('lobby');
+    expect(join.state.humans).toEqual(['new']);
   });
 });
