@@ -32,14 +32,21 @@ export function hasAiBrain(roomId: string, entityId: string): boolean {
   return brains.has(brainKey(roomId, entityId));
 }
 
+/** Effective move speed for AI rabbits — must equal human rabbit speed. */
+export function aiRabbitMoveSpeed(): number {
+  return AI_SPEED;
+}
+
 /**
  * Update AI velocities with simple waypoint / idle patterns so they blend with hiders.
+ * Uses the same base speed as human rabbits (no systematic slower variance).
  */
 export function stepAiCrowd(state: MatchState, dtMs: number, seed = 1): MatchState {
   if (state.phase !== 'playing') return state;
   const rng = createRng(seed + state.tick);
   const entities: Record<string, EntityState> = { ...state.entities };
   const roomId = state.roomId;
+  const speed = aiRabbitMoveSpeed();
 
   for (const e of Object.values(state.entities)) {
     if (e.kind !== 'ai' || !e.alive) continue;
@@ -63,7 +70,7 @@ export function stepAiCrowd(state: MatchState, dtMs: number, seed = 1): MatchSta
     } else {
       const nx = dx / dist;
       const ny = dy / dist;
-      const speed = AI_SPEED * (0.75 + rng() * 0.5);
+      // Same magnitude as human rabbit — no 0.75–1.5 multiplier lag
       entities[e.id] = { ...e, vx: nx * speed, vy: ny * speed };
     }
   }

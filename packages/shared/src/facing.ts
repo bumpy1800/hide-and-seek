@@ -1,14 +1,10 @@
 /** Cardinal facing for top-down animal sprites. */
 export type Facing = 'up' | 'down' | 'left' | 'right';
 
-/** Which way the source texture "points" at angle 0 (no rotation). */
-export type BaseHeading = Facing;
-
 /** Velocity below this (world units/sec) keeps previous facing. */
 export const FACING_IDLE_EPS = 1;
 
-/** Clockwise order starting at up (Phaser angle increases clockwise). */
-const CLOCKWISE: readonly Facing[] = ['up', 'right', 'down', 'left'];
+export type AnimalKind = 'rabbit' | 'fox';
 
 /**
  * Derive facing from velocity. Dominant axis wins when both nonzero.
@@ -31,56 +27,27 @@ export function facingFromVelocity(
   return vy > 0 ? 'down' : 'up';
 }
 
-/** Phaser-friendly transform for a single-orientation texture. */
-export type FacingTransform = {
-  flipX: boolean;
-  flipY: boolean;
-  /** Degrees, Phaser clockwise from the texture's natural orientation. */
-  angle: number;
-};
-
-function transformKey(t: FacingTransform): string {
-  return `${t.flipX ? 1 : 0},${t.flipY ? 1 : 0},${t.angle}`;
-}
-
 /**
- * Map world facing → flip/angle so one texture can show all four directions.
- *
- * Meadow rabbit + fox PNGs are both upright with the head toward the **top**
- * of the texture (base heading `'up'`). Rotation from that base:
- * - up → 0°
- * - right → 90°
- * - down → 180°
- * - left → 270°
- *
- * All four facings produce pairwise-distinct transforms.
+ * Texture key for a drawn directional asset (not rotate of a single image).
+ * Keys: hider_rabbit_{up|down|left|right}, seeker_fox_{up|down|left|right}
  */
-export function facingTransform(
-  facing: Facing,
-  baseHeading: BaseHeading = 'up',
-): FacingTransform {
-  const targetIdx = CLOCKWISE.indexOf(facing);
-  const baseIdx = CLOCKWISE.indexOf(baseHeading);
-  const steps = (targetIdx - baseIdx + 4) % 4;
-  const angle = steps * 90;
-  return { flipX: false, flipY: false, angle };
+export function animalTextureKey(kind: AnimalKind, facing: Facing): string {
+  const prefix = kind === 'fox' ? 'seeker_fox' : 'hider_rabbit';
+  return `${prefix}_${facing}`;
 }
 
-/**
- * Base heading baked into meadow character textures.
- * Both hider_rabbit and seeker_fox have head toward top of the image.
- */
-export function baseHeadingForTexture(textureKey: string): BaseHeading {
-  void textureKey;
-  return 'up';
+/** All directional texture keys that must be loaded. */
+export function allAnimalTextureKeys(): string[] {
+  const dirs: Facing[] = ['up', 'down', 'left', 'right'];
+  return [
+    ...dirs.map((d) => animalTextureKey('rabbit', d)),
+    ...dirs.map((d) => animalTextureKey('fox', d)),
+  ];
 }
 
-/** True if all four cardinal facings map to distinct visual transforms for this base. */
-export function allFacingsDistinct(baseHeading: BaseHeading = 'up'): boolean {
-  const keys = new Set(
-    (['up', 'down', 'left', 'right'] as const).map((f) =>
-      transformKey(facingTransform(f, baseHeading)),
-    ),
-  );
-  return keys.size === 4;
+/** True if the four rabbit keys are all distinct strings. */
+export function directionalKeysAreDistinct(kind: AnimalKind): boolean {
+  const dirs: Facing[] = ['up', 'down', 'left', 'right'];
+  const keys = dirs.map((d) => animalTextureKey(kind, d));
+  return new Set(keys).size === 4;
 }

@@ -9,7 +9,8 @@ import {
   attemptCatch,
   nearestCatchTarget,
   setEntityVelocity,
-  PLAYER_SPEED,
+  RABBIT_SPEED,
+  SEEKER_SPEED,
   type ClientIntent,
   type MatchState,
   type PracticeRole,
@@ -71,8 +72,10 @@ export class LocalPracticeHost {
       const len = Math.hypot(intent.dx, intent.dy) || 1;
       const nx = intent.dx / len;
       const ny = intent.dy / len;
-      const vx = intent.dx === 0 && intent.dy === 0 ? 0 : nx * PLAYER_SPEED;
-      const vy = intent.dx === 0 && intent.dy === 0 ? 0 : ny * PLAYER_SPEED;
+      const isSeeker = this.state.seekerId === this.playerId;
+      const speed = isSeeker ? SEEKER_SPEED : RABBIT_SPEED;
+      const vx = intent.dx === 0 && intent.dy === 0 ? 0 : nx * speed;
+      const vy = intent.dx === 0 && intent.dy === 0 ? 0 : ny * speed;
       this.state = setEntityVelocity(this.state, this.playerId, vx, vy);
       return;
     }

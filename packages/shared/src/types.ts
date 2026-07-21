@@ -2,8 +2,14 @@ export const MAX_HUMAN_PLAYERS = 8;
 export const DEFAULT_TIME_LIMIT_MS = 90_000;
 export const DEFAULT_CATCH_BUDGET = 3;
 export const CATCH_RANGE = 48;
-export const PLAYER_SPEED = 180;
-export const AI_SPEED = 100;
+/** Shared rabbit move speed: human hiders and AI rabbits use this same value. */
+export const RABBIT_SPEED = 140;
+/** @deprecated alias — human non-seeker and AI use RABBIT_SPEED */
+export const PLAYER_SPEED = RABBIT_SPEED;
+/** AI rabbit speed equals human rabbit (no slower base). */
+export const AI_SPEED = RABBIT_SPEED;
+/** Fox/seeker may be slightly faster for catch gameplay */
+export const SEEKER_SPEED = 160;
 export const DEFAULT_AI_COUNT = 18;
 export const SEEKER_PREP_MS = 10_000;
 export const MAP_WIDTH = 2400;

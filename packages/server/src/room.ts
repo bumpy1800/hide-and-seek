@@ -1,5 +1,6 @@
 import {
-  PLAYER_SPEED,
+  SEEKER_SPEED,
+  RABBIT_SPEED,
   attemptCatch,
   canSeekerAct,
   createLobby,
@@ -136,7 +137,8 @@ export class Room {
       const len = Math.hypot(intent.dx, intent.dy) || 1;
       const nx = intent.dx / len;
       const ny = intent.dy / len;
-      const speed = PLAYER_SPEED;
+      const isSeeker = this.state.seekerId === playerId;
+      const speed = isSeeker ? SEEKER_SPEED : RABBIT_SPEED;
       const vx = intent.dx === 0 && intent.dy === 0 ? 0 : nx * speed;
       const vy = intent.dx === 0 && intent.dy === 0 ? 0 : ny * speed;
       this.state = setEntityVelocity(this.state, playerId, vx, vy);

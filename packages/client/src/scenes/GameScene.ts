@@ -9,8 +9,7 @@ import {
   type PracticeRole,
   type MatchState,
   facingFromVelocity,
-  facingTransform,
-  baseHeadingForTexture,
+  animalTextureKey,
   type Facing,
 } from '@hide-and-seek/shared';
 import { IntentInput } from '../input/IntentInput';
@@ -323,8 +322,13 @@ export class GameScene extends Phaser.Scene {
         }
       }
 
+      // Direction from velocity → distinct drawn texture (no setAngle rotate)
+      const prevFace = this.lastFacing.get(e.id) ?? 'down';
+      const face = facingFromVelocity(display.vx, display.vy, prevFace);
+      this.lastFacing.set(e.id, face);
+      const tex = textureFor(e, state.seekerId, face);
+
       let spr = this.sprites.get(e.id);
-      const tex = textureFor(e, state.seekerId);
       if (!spr) {
         spr = this.add.sprite(display.x, display.y, tex).setDepth(10);
         this.sprites.set(e.id, spr);
@@ -341,17 +345,11 @@ export class GameScene extends Phaser.Scene {
       } else if (spr.texture.key !== tex) {
         spr.setTexture(tex);
       }
-      // While seeker is fully blacked out, hide other sprites under overlay anyway
       spr.setPosition(display.x, display.y);
-      // Face movement direction (up/down/left/right) from velocity
-      const prevFace = this.lastFacing.get(e.id) ?? 'down';
-      const face = facingFromVelocity(display.vx, display.vy, prevFace);
-      this.lastFacing.set(e.id, face);
-      // Rabbit art faces up; fox art faces left — use texture-specific base heading
-      const xf = facingTransform(face, baseHeadingForTexture(tex));
-      spr.setFlipX(xf.flipX);
-      spr.setFlipY(xf.flipY);
-      spr.setAngle(xf.angle);
+      // Reset any legacy rotate/flip — facing is the texture itself
+      spr.setFlipX(false);
+      spr.setFlipY(false);
+      spr.setAngle(0);
       spr.setAlpha(e.alive ? 1 : 0.35);
       spr.setVisible(!(seekerBlind && e.id !== you));
       const tag = this.nameTags.get(e.id);
@@ -428,10 +426,12 @@ export class GameScene extends Phaser.Scene {
   }
 }
 
-function textureFor(e: EntityState, seekerId: string | null): string {
+function textureFor(e: EntityState, seekerId: string | null, facing: Facing): string {
   if (!e.alive) return 'caught';
-  if (e.id === seekerId || e.role === 'seeker') return 'seeker_fox';
-  return 'hider_rabbit';
+  if (e.id === seekerId || e.role === 'seeker') {
+    return animalTextureKey('fox', facing);
+  }
+  return animalTextureKey('rabbit', facing);
 }
 
 function labelFor(e: EntityState, you: string | null): string {
