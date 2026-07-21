@@ -1,0 +1,7 @@
+{
+  "buildCommand": "npm install && npm run build -w @hide-and-seek/shared && npm run build -w @hide-and-seek/client",
+  "outputDirectory": "packages/client/dist",
+  "installCommand": "npm install",
+  "framework": null,
+  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+}
