@@ -51,9 +51,9 @@ describe('random seeker', () => {
 
 describe('timer and catch budget', () => {
   it('ends match for hiders when time expires with living hider', () => {
-    let state = createLobby('r1', defaultConfig({ timeLimitMs: 1000, aiCount: 2 }));
+    let state = createLobby('r1', defaultConfig({ seekerPrepMs: 0, timeLimitMs: 1000, aiCount: 2 }));
     state = joinHuman(state, 's', 'Seeker').ok ? (joinHuman(state, 's', 'Seeker') as { ok: true; state: typeof state }).state : state;
-    let res = joinHuman(createLobby('r1', defaultConfig({ timeLimitMs: 1000, aiCount: 2 })), 's', 'S');
+    let res = joinHuman(createLobby('r1', defaultConfig({ seekerPrepMs: 0, timeLimitMs: 1000, aiCount: 2 })), 's', 'S');
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     state = res.state;
@@ -61,6 +61,7 @@ describe('timer and catch budget', () => {
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     state = startMatch(res.state, 1);
+    state = { ...state, seekerPrepRemainingMs: 0 };
     state = tickTimer(state, 1000);
     expect(state.phase).toBe('ended');
     expect(state.winner).toBe('hiders');
@@ -68,7 +69,7 @@ describe('timer and catch budget', () => {
   });
 
   it('decrements catch budget and rejects when exhausted', () => {
-    let lobby = createLobby('r1', defaultConfig({ catchBudget: 2, aiCount: 1, catchRange: 1000 }));
+    let lobby = createLobby('r1', defaultConfig({ seekerPrepMs: 0, catchBudget: 2, aiCount: 1, catchRange: 1000 }));
     let res = joinHuman(lobby, 'seek', 'S', { x: 100, y: 100 });
     expect(res.ok).toBe(true);
     if (!res.ok) return;
@@ -119,7 +120,7 @@ describe('timer and catch budget', () => {
     }
 
     // Exhaust budget with no targets left path: start fresh budget 1 waste on AI
-    lobby = createLobby('r2', defaultConfig({ catchBudget: 1, aiCount: 1, catchRange: 1000 }));
+    lobby = createLobby('r2', defaultConfig({ seekerPrepMs: 0, catchBudget: 1, aiCount: 1, catchRange: 1000 }));
     res = joinHuman(lobby, 'seek', 'S', { x: 100, y: 100 });
     res = joinHuman(res.ok ? res.state : lobby, 'hide', 'H', { x: 200, y: 200 });
     expect(res.ok).toBe(true);
@@ -151,7 +152,7 @@ describe('timer and catch budget', () => {
   });
 
   it('rejects catching AI as player elimination and accepts human hider', () => {
-    let lobby = createLobby('r1', defaultConfig({ catchBudget: 3, aiCount: 3, catchRange: 80 }));
+    let lobby = createLobby('r1', defaultConfig({ seekerPrepMs: 0, catchBudget: 3, aiCount: 3, catchRange: 80 }));
     let res = joinHuman(lobby, 'p1', 'A', { x: 50, y: 50 });
     res = joinHuman(res.ok ? res.state : lobby, 'p2', 'B', { x: 60, y: 50 });
     expect(res.ok).toBe(true);
@@ -192,7 +193,9 @@ describe('rematch and rejoin after ended', () => {
     res = joinHuman(res.ok ? res.state : lobby, 'b', 'B');
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    let state = startMatch(res.state, 5);
+    let state = startMatch(res.state, { seed: 5, mode: 'normal' });
+    // Finish seeker prep then expire hunt timer
+    state = { ...state, seekerPrepRemainingMs: 0 };
     state = tickTimer(state, 100);
     expect(state.phase).toBe('ended');
 

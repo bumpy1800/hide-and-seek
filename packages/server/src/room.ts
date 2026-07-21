@@ -1,9 +1,11 @@
 import {
   PLAYER_SPEED,
   attemptCatch,
+  canSeekerAct,
   createLobby,
   defaultConfig,
   integrateMotion,
+  isSeekerPrepActive,
   joinHuman,
   leaveHuman,
   nearestCatchTarget,
@@ -15,6 +17,7 @@ import {
   tickTimer,
   type ClientIntent,
   type ClientMessage,
+  type MatchMode,
   type MatchState,
   type ServerMessage,
 } from '@hide-and-seek/shared';
@@ -74,7 +77,6 @@ export class Room {
 
   applyIntent(playerId: string, intent: ClientIntent): void {
     if (intent.type === 'start') {
-      // Lobby start or rematch after ended
       if (this.state.phase === 'playing') return;
       if (this.state.phase === 'ended') {
         this.state = returnToLobby(this.state);
@@ -84,10 +86,15 @@ export class Room {
       if (this.state.phase !== 'lobby') return;
       if (this.state.humans.length < 1) return;
       resetAiBrains(this.id);
-      this.state = startMatch(this.state, Date.now() ^ this.state.humans.length);
+      const mode: MatchMode = intent.mode === 'practice' ? 'practice' : 'normal';
+      this.state = startMatch(this.state, { mode, seed: Date.now() ^ this.state.humans.length });
       this.endedBroadcast = false;
       this.broadcastSnapshot();
-      this.broadcast({ type: 'event', event: 'match_started', detail: { seekerId: this.state.seekerId } });
+      this.broadcast({
+        type: 'event',
+        event: 'match_started',
+        detail: { seekerId: this.state.seekerId, mode: this.state.mode },
+      });
       return;
     }
 
@@ -96,6 +103,10 @@ export class Room {
     if (!entity || !entity.alive) return;
 
     if (intent.type === 'move') {
+      // Seeker cannot move during prep
+      if (this.state.seekerId === playerId && isSeekerPrepActive(this.state)) {
+        return;
+      }
       const len = Math.hypot(intent.dx, intent.dy) || 1;
       const nx = intent.dx / len;
       const ny = intent.dy / len;
@@ -107,7 +118,7 @@ export class Room {
     }
 
     if (intent.type === 'catch') {
-      if (this.state.seekerId !== playerId) return;
+      if (!canSeekerAct(this.state, playerId)) return;
       const targetId = nearestCatchTarget(this.state, playerId);
       if (!targetId) {
         this.send(playerId, { type: 'event', event: 'catch_miss', detail: { reason: 'no_target' } });

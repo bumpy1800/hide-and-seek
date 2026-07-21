@@ -1,9 +1,12 @@
 import Phaser from 'phaser';
-import type { ClientIntent } from '@hide-and-seek/shared';
+import {
+  collectBrowserMobileSignals,
+  shouldShowMobileKeypad,
+  type ClientIntent,
+} from '@hide-and-seek/shared';
 
 /**
- * Unified keyboard + touch pad → ClientIntent move/catch.
- * Dual modality shares one code path.
+ * Unified keyboard + (mobile-only) touch pad → ClientIntent move/catch.
  */
 export class IntentInput {
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
@@ -22,6 +25,8 @@ export class IntentInput {
   private activePointerId: number | null = null;
   private readonly stickCenter = { x: 100, y: 0 };
   private readonly stickRadius = 56;
+  private readonly mobileKeypad: boolean;
+  private touchEnabled = false;
 
   constructor(private scene: Phaser.Scene) {
     const kb = scene.input.keyboard;
@@ -36,6 +41,13 @@ export class IntentInput {
       d: kb.addKey(Phaser.Input.Keyboard.KeyCodes.D),
     };
     this.space = kb.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+
+    this.mobileKeypad = shouldShowMobileKeypad(
+      collectBrowserMobileSignals(
+        typeof navigator !== 'undefined' ? navigator : {},
+        typeof window !== 'undefined' ? window : {},
+      ),
+    );
 
     const h = scene.scale.height;
     this.stickCenter.y = h - 100;
@@ -67,16 +79,19 @@ export class IntentInput {
       );
 
     this.catchBtn.on('pointerdown', () => {
+      if (!this.mobileKeypad || !this.touchEnabled) return;
       this.catchQueued = true;
     });
 
     scene.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      if (!this.mobileKeypad || !this.touchEnabled) return;
       if (p.x < scene.scale.width * 0.45) {
         this.activePointerId = p.id;
         this.updateStick(p.x, p.y);
       }
     });
     scene.input.on('pointermove', (p: Phaser.Input.Pointer) => {
+      if (!this.mobileKeypad || !this.touchEnabled) return;
       if (this.activePointerId === p.id && p.isDown) {
         this.updateStick(p.x, p.y);
       }
@@ -93,6 +108,25 @@ export class IntentInput {
     this.space.on('down', () => {
       this.catchQueued = true;
     });
+
+    // Initial: hide touch chrome on desktop; catch visibility set by GameScene for seeker
+    this.setKeypadVisible(this.mobileKeypad);
+  }
+
+  get showsMobileKeypad(): boolean {
+    return this.mobileKeypad;
+  }
+
+  private setKeypadVisible(visible: boolean): void {
+    this.base.setVisible(visible);
+    this.knob.setVisible(visible);
+    // catch button visibility is role-gated separately; base hide when not mobile
+    if (!visible) {
+      this.catchBtn.setVisible(false);
+      this.touchEnabled = false;
+    } else {
+      this.touchEnabled = true;
+    }
   }
 
   private updateStick(x: number, y: number): void {
@@ -109,11 +143,10 @@ export class IntentInput {
     this.stick.dy = nd ? (dy * cl) / max : 0;
   }
 
-  /** Poll once per frame; returns intents to send. */
   poll(): ClientIntent[] {
     const intents: ClientIntent[] = [];
-    let dx = this.stick.dx;
-    let dy = this.stick.dy;
+    let dx = this.mobileKeypad ? this.stick.dx : 0;
+    let dy = this.mobileKeypad ? this.stick.dy : 0;
 
     if (this.cursors.left?.isDown || this.wasd.a.isDown) dx -= 1;
     if (this.cursors.right?.isDown || this.wasd.d.isDown) dx += 1;
@@ -129,8 +162,9 @@ export class IntentInput {
     return intents;
   }
 
+  /** Catch button only on mobile seeker (or practice never). */
   setCatchVisible(visible: boolean): void {
-    this.catchBtn.setVisible(visible);
+    this.catchBtn.setVisible(this.mobileKeypad && visible);
   }
 
   destroy(): void {

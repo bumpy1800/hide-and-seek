@@ -6,8 +6,10 @@ import {
   MAP_HEIGHT,
   MAP_WIDTH,
   MAX_HUMAN_PLAYERS,
+  SEEKER_PREP_MS,
   type EntityState,
   type MatchConfig,
+  type MatchMode,
   type MatchState,
   type Winner,
 } from './types.js';
@@ -22,6 +24,7 @@ export function defaultConfig(overrides: Partial<MatchConfig> = {}): MatchConfig
     mapWidth: MAP_WIDTH,
     mapHeight: MAP_HEIGHT,
     catchRange: CATCH_RANGE,
+    seekerPrepMs: SEEKER_PREP_MS,
     ...overrides,
   };
 }
@@ -30,12 +33,14 @@ export function createLobby(roomId: string, config: MatchConfig = defaultConfig(
   return {
     roomId,
     phase: 'lobby',
+    mode: 'normal',
     config,
     humans: [],
     seekerId: null,
     entities: {},
     catchBudgetRemaining: config.catchBudget,
     timeRemainingMs: config.timeLimitMs,
+    seekerPrepRemainingMs: 0,
     winner: null,
     endReason: null,
     tick: 0,
@@ -47,15 +52,11 @@ export type JoinResult =
   | { ok: false; reason: string; state: MatchState };
 
 export function canJoin(state: MatchState): boolean {
-  // Lobby always; ended rooms auto-reset on join so rematches work without server restart.
   if (state.phase === 'playing') return false;
   if (state.phase === 'ended') return state.humans.length < state.config.maxHumans;
   return state.humans.length < state.config.maxHumans;
 }
 
-/**
- * Strip AI, revive humans as hiders, clear match result — keep connected humans.
- */
 export function returnToLobby(state: MatchState): MatchState {
   const entities: Record<string, EntityState> = {};
   for (const id of state.humans) {
@@ -73,10 +74,12 @@ export function returnToLobby(state: MatchState): MatchState {
   return {
     ...state,
     phase: 'lobby',
+    mode: 'normal',
     seekerId: null,
     entities,
     catchBudgetRemaining: state.config.catchBudget,
     timeRemainingMs: state.config.timeLimitMs,
+    seekerPrepRemainingMs: 0,
     winner: null,
     endReason: null,
     tick: 0,
@@ -90,7 +93,6 @@ export function joinHuman(
   spawn?: { x: number; y: number },
 ): JoinResult {
   let current = state;
-  // After a match ends (or stuck non-lobby), open lobby so refresh/rematch can rejoin.
   if (current.phase === 'ended') {
     current = returnToLobby(current);
   }
@@ -132,7 +134,6 @@ export function joinHuman(
 export function leaveHuman(state: MatchState, playerId: string): MatchState {
   if (!state.humans.includes(playerId)) return state;
   const { [playerId]: _removed, ...rest } = state.entities;
-  // Drop AI when last human leaves mid-lobby; keep non-human only during play
   const entities =
     state.phase === 'lobby'
       ? Object.fromEntries(Object.entries(rest).filter(([, e]) => e.kind === 'human'))
@@ -142,17 +143,48 @@ export function leaveHuman(state: MatchState, playerId: string): MatchState {
     humans: state.humans.filter((id) => id !== playerId),
     entities,
   };
-  if (next.phase === 'playing') {
+  if (next.phase === 'playing' && next.mode !== 'practice') {
     return evaluateEndConditions(next);
   }
   return next;
 }
 
+function spawnAiCrowd(
+  config: MatchConfig,
+  rng: () => number,
+): Record<string, EntityState> {
+  const entities: Record<string, EntityState> = {};
+  for (let i = 0; i < config.aiCount; i++) {
+    const id = `ai-${i}`;
+    entities[id] = {
+      id,
+      kind: 'ai',
+      role: 'hider',
+      name: `NPC-${i}`,
+      x: 40 + rng() * (config.mapWidth - 80),
+      y: 40 + rng() * (config.mapHeight - 80),
+      vx: 0,
+      vy: 0,
+      alive: true,
+    };
+  }
+  return entities;
+}
+
+export type StartOptions = {
+  mode?: MatchMode;
+  seed?: number;
+};
+
 /**
- * Assign a random seeker among joined humans and spawn AI crowd.
- * Seedable for tests. Accepts lobby, or ended (auto returnToLobby first).
+ * Start a normal hunt (random seeker + prep) or practice (no seeker).
  */
-export function startMatch(state: MatchState, seed: number = Date.now()): MatchState {
+export function startMatch(state: MatchState, seedOrOpts: number | StartOptions = Date.now()): MatchState {
+  const opts: StartOptions =
+    typeof seedOrOpts === 'number' ? { seed: seedOrOpts, mode: 'normal' } : seedOrOpts;
+  const mode: MatchMode = opts.mode ?? 'normal';
+  const seed = opts.seed ?? Date.now();
+
   let current = state;
   if (current.phase === 'ended') {
     current = returnToLobby(current);
@@ -164,9 +196,13 @@ export function startMatch(state: MatchState, seed: number = Date.now()): MatchS
     throw new Error('startMatch: need at least 1 human');
   }
 
+  if (mode === 'practice') {
+    return startPracticeMatch(current, seed);
+  }
+
   const rng = createRng(seed);
   const seekerId = pickRandom(current.humans, rng);
-  const entities: Record<string, EntityState> = {};
+  const entities: Record<string, EntityState> = { ...spawnAiCrowd(current.config, rng) };
 
   for (const id of current.humans) {
     const prev = current.entities[id]!;
@@ -181,21 +217,6 @@ export function startMatch(state: MatchState, seed: number = Date.now()): MatchS
     };
   }
 
-  for (let i = 0; i < current.config.aiCount; i++) {
-    const id = `ai-${i}`;
-    entities[id] = {
-      id,
-      kind: 'ai',
-      role: 'hider',
-      name: `NPC-${i}`,
-      x: 40 + rng() * (current.config.mapWidth - 80),
-      y: 40 + rng() * (current.config.mapHeight - 80),
-      vx: 0,
-      vy: 0,
-      alive: true,
-    };
-  }
-
   const seeker = entities[seekerId]!;
   entities[seekerId] = {
     ...seeker,
@@ -206,14 +227,87 @@ export function startMatch(state: MatchState, seed: number = Date.now()): MatchS
   return {
     ...current,
     phase: 'playing',
+    mode: 'normal',
     seekerId,
     entities,
     catchBudgetRemaining: current.config.catchBudget,
     timeRemainingMs: current.config.timeLimitMs,
+    seekerPrepRemainingMs: current.config.seekerPrepMs,
     winner: null,
     endReason: null,
     tick: 0,
   };
+}
+
+/**
+ * Practice: no seeker, all humans are hiders, AI crowd for blending rehearsal.
+ * Hunt win/lose and catch budget do not apply.
+ */
+export function startPracticeMatch(state: MatchState, seed: number = Date.now()): MatchState {
+  let current = state;
+  if (current.phase === 'ended') {
+    current = returnToLobby(current);
+  }
+  if (current.phase !== 'lobby') {
+    throw new Error('startPracticeMatch: not in lobby');
+  }
+  if (current.humans.length < 1) {
+    throw new Error('startPracticeMatch: need at least 1 human');
+  }
+
+  const rng = createRng(seed);
+  const entities: Record<string, EntityState> = { ...spawnAiCrowd(current.config, rng) };
+
+  for (const id of current.humans) {
+    const prev = current.entities[id]!;
+    entities[id] = {
+      ...prev,
+      role: 'hider',
+      alive: true,
+      vx: 0,
+      vy: 0,
+      x: clamp(prev.x, 24, current.config.mapWidth - 24),
+      y: clamp(prev.y, 24, current.config.mapHeight - 24),
+    };
+  }
+
+  return {
+    ...current,
+    phase: 'playing',
+    mode: 'practice',
+    seekerId: null,
+    entities,
+    catchBudgetRemaining: current.config.catchBudget,
+    timeRemainingMs: current.config.timeLimitMs,
+    seekerPrepRemainingMs: 0,
+    winner: null,
+    endReason: null,
+    tick: 0,
+  };
+}
+
+/** Seeker cannot move or catch until prep elapses (normal mode only). */
+export function canSeekerAct(state: MatchState, playerId: string): boolean {
+  if (state.mode === 'practice') return false;
+  if (state.phase !== 'playing') return false;
+  if (state.seekerId !== playerId) return false;
+  return state.seekerPrepRemainingMs <= 0;
+}
+
+/** Seeker vision of rabbit motion is blocked during prep. */
+export function canSeekerSee(state: MatchState, playerId: string): boolean {
+  if (state.mode === 'practice') return true;
+  if (state.phase !== 'playing') return true;
+  if (state.seekerId !== playerId) return true;
+  return state.seekerPrepRemainingMs <= 0;
+}
+
+export function isSeekerPrepActive(state: MatchState): boolean {
+  return (
+    state.mode === 'normal' &&
+    state.phase === 'playing' &&
+    state.seekerPrepRemainingMs > 0
+  );
 }
 
 export type CatchResult =
@@ -221,8 +315,14 @@ export type CatchResult =
   | { ok: false; reason: string; state: MatchState };
 
 export function attemptCatch(state: MatchState, seekerId: string, targetId: string): CatchResult {
+  if (state.mode === 'practice') {
+    return { ok: false, reason: 'practice_no_catch', state };
+  }
   if (state.phase !== 'playing') {
     return { ok: false, reason: 'not_playing', state };
+  }
+  if (!canSeekerAct(state, seekerId)) {
+    return { ok: false, reason: 'seeker_prep', state };
   }
   if (state.seekerId !== seekerId) {
     return { ok: false, reason: 'not_seeker', state };
@@ -251,10 +351,7 @@ export function attemptCatch(state: MatchState, seekerId: string, targetId: stri
   const budget = state.catchBudgetRemaining - 1;
 
   if (target.kind === 'ai') {
-    let next: MatchState = {
-      ...state,
-      catchBudgetRemaining: budget,
-    };
+    let next: MatchState = { ...state, catchBudgetRemaining: budget };
     next = evaluateEndConditions(next);
     return { ok: false, reason: 'target_is_ai', state: next };
   }
@@ -263,17 +360,29 @@ export function attemptCatch(state: MatchState, seekerId: string, targetId: stri
     ...state.entities,
     [targetId]: { ...target, alive: false, vx: 0, vy: 0 },
   };
-  let next: MatchState = {
-    ...state,
-    entities,
-    catchBudgetRemaining: budget,
-  };
+  let next: MatchState = { ...state, entities, catchBudgetRemaining: budget };
   next = evaluateEndConditions(next);
   return { ok: true, state: next, caughtId: targetId, kind: 'human' };
 }
 
 export function tickTimer(state: MatchState, dtMs: number): MatchState {
   if (state.phase !== 'playing') return state;
+
+  // Prep countdown: AI may still move; main hunt timer waits until prep ends.
+  if (state.mode === 'normal' && state.seekerPrepRemainingMs > 0) {
+    const seekerPrepRemainingMs = Math.max(0, state.seekerPrepRemainingMs - dtMs);
+    return {
+      ...state,
+      seekerPrepRemainingMs,
+      tick: state.tick + 1,
+    };
+  }
+
+  // Practice: no timed win/lose — just tick for AI stepping
+  if (state.mode === 'practice') {
+    return { ...state, tick: state.tick + 1 };
+  }
+
   const timeRemainingMs = Math.max(0, state.timeRemainingMs - dtMs);
   return evaluateEndConditions({ ...state, timeRemainingMs, tick: state.tick + 1 });
 }
@@ -286,6 +395,10 @@ export function setEntityVelocity(
 ): MatchState {
   const e = state.entities[entityId];
   if (!e || !e.alive) return state;
+  // Seeker locked during prep
+  if (state.seekerId === entityId && isSeekerPrepActive(state)) {
+    return state;
+  }
   return {
     ...state,
     entities: {
@@ -303,6 +416,11 @@ export function integrateMotion(state: MatchState, dtSec: number): MatchState {
       entities[id] = e;
       continue;
     }
+    // Freeze seeker position during prep even if velocity was set
+    if (state.seekerId === id && isSeekerPrepActive(state)) {
+      entities[id] = { ...e, vx: 0, vy: 0 };
+      continue;
+    }
     const x = clamp(e.x + e.vx * dtSec, 16, state.config.mapWidth - 16);
     const y = clamp(e.y + e.vy * dtSec, 16, state.config.mapHeight - 16);
     entities[id] = { ...e, x, y };
@@ -318,6 +436,7 @@ export function livingHumanHiders(state: MatchState): EntityState[] {
 
 export function evaluateEndConditions(state: MatchState): MatchState {
   if (state.phase !== 'playing') return state;
+  if (state.mode === 'practice') return state;
 
   const hidersLeft = livingHumanHiders(state).length;
 
@@ -342,6 +461,7 @@ export function endMatch(state: MatchState, winner: Winner, reason: string): Mat
     phase: 'ended',
     winner,
     endReason: reason,
+    seekerPrepRemainingMs: 0,
   };
 }
 

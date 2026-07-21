@@ -73,9 +73,10 @@ describe('multiplayer room host (in-process dual clients)', () => {
     expect(afterMoveA.state.entities[hiderId]!.vx).toBeGreaterThan(0);
     expect(afterMoveB.state.entities[hiderId]!.vx).toBe(afterMoveA.state.entities[hiderId]!.vx);
 
-    // Place seeker next to hider and catch
+    // Place seeker next to hider and catch (skip prep window)
     room.state = {
       ...room.state,
+      seekerPrepRemainingMs: 0,
       entities: {
         ...room.state.entities,
         [seekerId]: { ...room.state.entities[seekerId]!, x: 200, y: 200 },
@@ -104,7 +105,7 @@ describe('rematch after match ends', () => {
     expect(room.state.phase).toBe('playing');
 
     // Force end
-    room.state = { ...room.state, timeRemainingMs: 0 };
+    room.state = { ...room.state, timeRemainingMs: 0, seekerPrepRemainingMs: 0 };
     room.tick(50);
     expect(room.state.phase).toBe('ended');
 
@@ -119,7 +120,7 @@ describe('rematch after match ends', () => {
     expect(snapA?.state.seekerId).toBe(snapB?.state.seekerId);
 
     // New joiner after end (via another end cycle)
-    room.state = { ...room.state, timeRemainingMs: 0 };
+    room.state = { ...room.state, timeRemainingMs: 0, seekerPrepRemainingMs: 0 };
     room.tick(50);
     expect(room.state.phase).toBe('ended');
     const c = new FakeSocket();
@@ -127,5 +128,37 @@ describe('rematch after match ends', () => {
     expect(joined.message.type).toBe('welcome');
     expect(room.state.phase).toBe('lobby');
     expect(room.state.humans).toContain('p3');
+  });
+});
+
+describe('practice and seeker prep on room host', () => {
+  it('practice start has no seeker; prep blocks seeker move until elapsed', () => {
+    const manager = new RoomManager();
+    const a = new FakeSocket();
+    manager.joinRoom('practice-room', 'solo', a, 'Solo');
+    const room = manager.get('practice-room')!;
+    room.applyIntent('solo', { type: 'start', mode: 'practice' });
+    expect(room.state.mode).toBe('practice');
+    expect(room.state.seekerId).toBeNull();
+    expect(room.state.phase).toBe('playing');
+
+    const manager2 = new RoomManager();
+    const s = new FakeSocket();
+    const h = new FakeSocket();
+    manager2.joinRoom('prep-room', 'seek', s, 'S');
+    manager2.joinRoom('prep-room', 'hide', h, 'H');
+    const r2 = manager2.get('prep-room')!;
+    r2.applyIntent('seek', { type: 'start', mode: 'normal' });
+    expect(r2.state.seekerPrepRemainingMs).toBeGreaterThan(0);
+    const sid = r2.state.seekerId!;
+    const before = { ...r2.state.entities[sid]! };
+    r2.applyIntent(sid, { type: 'move', dx: 1, dy: 0 });
+    // prep freezes seeker velocity
+    expect(r2.state.entities[sid]!.vx).toBe(0);
+    // elapse prep
+    r2.state = { ...r2.state, seekerPrepRemainingMs: 0 };
+    r2.applyIntent(sid, { type: 'move', dx: 1, dy: 0 });
+    expect(r2.state.entities[sid]!.vx).toBeGreaterThan(0);
+    expect(before.id).toBe(sid);
   });
 });

@@ -1,9 +1,19 @@
 import Phaser from 'phaser';
-import { MAP_HEIGHT, MAP_WIDTH, type EntityState, type MatchState } from '@hide-and-seek/shared';
+import {
+  MAP_HEIGHT,
+  MAP_WIDTH,
+  canSeekerSee,
+  isSeekerPrepActive,
+  type EntityState,
+  type MatchMode,
+  type MatchState,
+} from '@hide-and-seek/shared';
 import { IntentInput } from '../input/IntentInput';
 import { GameClient } from '../net/GameClient';
 import { getWsUrl } from '../config';
 import { buildMeadowWorld } from '../world/MeadowMap';
+
+type GameSceneData = { mode?: MatchMode };
 
 export class GameScene extends Phaser.Scene {
   private client!: GameClient;
@@ -13,21 +23,33 @@ export class GameScene extends Phaser.Scene {
   private hud!: Phaser.GameObjects.Text;
   private statusText!: Phaser.GameObjects.Text;
   private startBtn!: Phaser.GameObjects.Container;
+  private prepOverlay!: Phaser.GameObjects.Rectangle;
+  private prepLabel!: Phaser.GameObjects.Text;
   private you: string | null = null;
   private state: MatchState | null = null;
   private roomId = 'lobby';
+  private playMode: MatchMode = 'normal';
   private playerName = `Guest${Math.floor(Math.random() * 900 + 100)}`;
   private lastMoveSent = { dx: 0, dy: 0 };
   private cameraFollowId: string | null = null;
+  private autoStarted = false;
+  /** Last positions shown to seeker during prep (frozen view of others). */
+  private frozenOthers = new Map<string, { x: number; y: number }>();
 
   constructor() {
     super('Game');
   }
 
+  init(data: GameSceneData): void {
+    this.playMode = data.mode === 'practice' ? 'practice' : 'normal';
+    this.roomId = this.playMode === 'practice' ? 'practice' : 'lobby';
+    this.autoStarted = false;
+    this.frozenOthers.clear();
+  }
+
   create(): void {
     const { width, height } = this.scale;
 
-    // Expanded meadow world (tiles + animal/flora decor)
     buildMeadowWorld(this, 7);
 
     this.cameras.main.setBounds(0, 0, MAP_WIDTH, MAP_HEIGHT);
@@ -51,6 +73,24 @@ export class GameScene extends Phaser.Scene {
       .setOrigin(0.5, 0)
       .setScrollFactor(0)
       .setDepth(2000);
+
+    // Seeker prep blackout — obscures world so rabbit motion is not visible
+    this.prepOverlay = this.add
+      .rectangle(width / 2, height / 2, width + 4, height + 4, 0x0b1020, 0.92)
+      .setScrollFactor(0)
+      .setDepth(1500)
+      .setVisible(false);
+    this.prepLabel = this.add
+      .text(width / 2, height / 2, '', {
+        fontSize: '28px',
+        color: '#f1c40f',
+        align: 'center',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(1501)
+      .setVisible(false);
 
     const btnBg = this.add.rectangle(0, 0, 200, 52, 0x27ae60, 0.95);
     const btnLabel = this.add
@@ -84,8 +124,19 @@ export class GameScene extends Phaser.Scene {
     this.client.onSnapshot = (state, you) => {
       this.you = you;
       this.state = state;
-      this.syncSprites(state);
+      // Auto-start practice once in lobby
+      if (
+        this.playMode === 'practice' &&
+        !this.autoStarted &&
+        state.phase === 'lobby' &&
+        state.humans.includes(you)
+      ) {
+        this.autoStarted = true;
+        this.client.sendIntent({ type: 'start', mode: 'practice' });
+      }
+      this.syncSprites(state, you);
       this.updateCameraFollow(you, state);
+      this.updatePrepOverlay(state, you);
       this.updateHud(state, you);
     };
     this.client.onEvent = (event, detail) => {
@@ -95,7 +146,13 @@ export class GameScene extends Phaser.Scene {
         const d = detail as { winner?: string; reason?: string };
         this.statusText.setText(`Ended — ${d.winner ?? '?'} (${d.reason ?? ''})`);
       } else if (event === 'match_started') {
-        this.statusText.setText('Match started — blend with the meadow animals!');
+        const d = detail as { mode?: string };
+        this.statusText.setText(
+          d.mode === 'practice'
+            ? '연습 모드 — AI 토끼 움직임에 맞춰 보세요'
+            : 'Match started — 술래는 10초 준비 후 사냥!',
+        );
+        this.frozenOthers.clear();
       }
     };
     this.client.connect();
@@ -104,7 +161,7 @@ export class GameScene extends Phaser.Scene {
     startKey?.on('down', () => this.requestStart());
 
     this.add
-      .text(width - 12, 12, 'ENTER / START · camera follows you', {
+      .text(width - 12, 12, this.playMode === 'practice' ? '연습 모드' : 'ENTER / START', {
         fontSize: '13px',
         color: '#ecf0f1',
         backgroundColor: '#00000066',
@@ -121,12 +178,22 @@ export class GameScene extends Phaser.Scene {
   }
 
   private requestStart(): void {
-    this.client.sendIntent({ type: 'start' });
+    this.client.sendIntent({
+      type: 'start',
+      mode: this.playMode === 'practice' ? 'practice' : 'normal',
+    });
   }
 
-  /**
-   * Keep the local player centered: camera follows their entity from snapshots.
-   */
+  private updatePrepOverlay(state: MatchState, you: string): void {
+    const blind = state.seekerId === you && isSeekerPrepActive(state);
+    this.prepOverlay.setVisible(blind);
+    this.prepLabel.setVisible(blind);
+    if (blind) {
+      const sec = Math.ceil(state.seekerPrepRemainingMs / 1000);
+      this.prepLabel.setText(`준비 중…\n토끼 움직임은 ${sec}초 후부터 보입니다\n(이동 불가)`);
+    }
+  }
+
   private updateCameraFollow(you: string, state: MatchState): void {
     const me = state.entities[you];
     if (!me) return;
@@ -144,6 +211,11 @@ export class GameScene extends Phaser.Scene {
 
   update(): void {
     if (!this.state || this.state.phase !== 'playing') return;
+    const you = this.you;
+    // Block local seeker input during prep (server also rejects)
+    if (you && this.state.seekerId === you && isSeekerPrepActive(this.state)) {
+      return;
+    }
     const intents = this.inputCtl.poll();
     for (const intent of intents) {
       if (intent.type === 'move') {
@@ -157,17 +229,37 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private syncSprites(state: MatchState): void {
+  private syncSprites(state: MatchState, you: string): void {
+    const seekerBlind = state.seekerId === you && !canSeekerSee(state, you);
+    // Capture freeze frame once when prep starts
+    if (seekerBlind && this.frozenOthers.size === 0) {
+      for (const e of Object.values(state.entities)) {
+        if (e.id === you) continue;
+        this.frozenOthers.set(e.id, { x: e.x, y: e.y });
+      }
+    }
+    if (!seekerBlind) {
+      this.frozenOthers.clear();
+    }
+
     const seen = new Set<string>();
     for (const e of Object.values(state.entities)) {
       seen.add(e.id);
+      let display = e;
+      if (seekerBlind && e.id !== you) {
+        const frozen = this.frozenOthers.get(e.id);
+        if (frozen) {
+          display = { ...e, x: frozen.x, y: frozen.y, vx: 0, vy: 0 };
+        }
+      }
+
       let spr = this.sprites.get(e.id);
       const tex = textureFor(e, state.seekerId);
       if (!spr) {
-        spr = this.add.sprite(e.x, e.y, tex).setDepth(10);
+        spr = this.add.sprite(display.x, display.y, tex).setDepth(10);
         this.sprites.set(e.id, spr);
         const tag = this.add
-          .text(e.x, e.y - 28, labelFor(e, this.you), {
+          .text(display.x, display.y - 28, labelFor(e, this.you), {
             fontSize: '11px',
             color: '#fff',
             backgroundColor: '#00000055',
@@ -179,12 +271,15 @@ export class GameScene extends Phaser.Scene {
       } else if (spr.texture.key !== tex) {
         spr.setTexture(tex);
       }
-      spr.setPosition(e.x, e.y);
+      // While seeker is fully blacked out, hide other sprites under overlay anyway
+      spr.setPosition(display.x, display.y);
       spr.setAlpha(e.alive ? 1 : 0.35);
+      spr.setVisible(!(seekerBlind && e.id !== you));
       const tag = this.nameTags.get(e.id);
-      tag?.setPosition(e.x, e.y - 28);
+      tag?.setPosition(display.x, display.y - 28);
       tag?.setText(labelFor(e, this.you));
       tag?.setAlpha(e.alive ? 1 : 0.35);
+      tag?.setVisible(!(seekerBlind && e.id !== you));
     }
     for (const id of [...this.sprites.keys()]) {
       if (!seen.has(id)) {
@@ -204,23 +299,40 @@ export class GameScene extends Phaser.Scene {
     const me = state.entities[you];
     const role = me?.role ?? '—';
     const sec = Math.ceil(state.timeRemainingMs / 1000);
+    const prepSec = Math.ceil(state.seekerPrepRemainingMs / 1000);
     const humans = state.humans.length;
     const lines = [
-      `Meadow ${state.roomId} | ${state.phase} | ${humans}/${state.config.maxHumans} · map ${state.config.mapWidth}×${state.config.mapHeight}`,
-      `You: ${role}${state.seekerId === you ? ' (여우 술래)' : me?.kind === 'human' ? ' (토끼 히더)' : ''}`,
-      `Time ${sec}s | Catches left ${state.catchBudgetRemaining}`,
+      `${state.mode === 'practice' ? '연습' : '사냥'} · ${state.roomId} | ${state.phase} | ${humans}/${state.config.maxHumans}`,
+      `You: ${role}${state.seekerId === you ? ' (여우 술래)' : me?.kind === 'human' ? ' (토끼)' : ''}`,
     ];
+    if (state.mode === 'practice') {
+      lines.push('AI 토끼 움직임 연습 · 술래 없음 · 잡기 없음');
+    } else {
+      lines.push(`Time ${sec}s | Catches ${state.catchBudgetRemaining}`);
+      if (isSeekerPrepActive(state) && state.seekerId === you) {
+        lines.push(`준비 ${prepSec}s — 시야/이동 잠금`);
+      } else if (isSeekerPrepActive(state)) {
+        lines.push(`술래 준비 중 ${prepSec}s… 움직이며 섞이세요!`);
+      }
+    }
     if (state.phase === 'lobby') {
-      lines.push('Tap START or ENTER · camera centers on you');
+      lines.push(state.mode === 'practice' || this.playMode === 'practice' ? '연습 시작 중…' : 'Tap START or ENTER');
     }
     if (state.phase === 'ended') {
       lines.push(`Winner: ${state.winner} — ${state.endReason}`);
       lines.push('Tap AGAIN or ENTER to rematch');
     }
     this.hud.setText(lines.join('\n'));
-    this.inputCtl.setCatchVisible(state.phase === 'playing' && state.seekerId === you);
 
-    const showStart = state.phase === 'lobby' || state.phase === 'ended';
+    const showCatch =
+      state.phase === 'playing' &&
+      state.mode === 'normal' &&
+      state.seekerId === you &&
+      !isSeekerPrepActive(state);
+    this.inputCtl.setCatchVisible(showCatch);
+
+    const showStart =
+      this.playMode !== 'practice' && (state.phase === 'lobby' || state.phase === 'ended');
     this.startBtn.setVisible(showStart);
     const label = this.startBtn.getData('label') as Phaser.GameObjects.Text | undefined;
     label?.setText(state.phase === 'ended' ? 'AGAIN' : 'START');
@@ -230,7 +342,6 @@ export class GameScene extends Phaser.Scene {
 function textureFor(e: EntityState, seekerId: string | null): string {
   if (!e.alive) return 'caught';
   if (e.id === seekerId || e.role === 'seeker') return 'seeker_fox';
-  // Human hiders + AI share identical rabbit look
   return 'hider_rabbit';
 }
 
