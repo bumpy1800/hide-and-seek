@@ -23,7 +23,10 @@ describe('expanded meadow map bounds', () => {
 
   it('clamps motion to the expanded map via integrateMotion', () => {
     let state = createLobby('bounds', defaultConfig());
-    const joined = joinHuman(state, 'p1', 'P', { x: MAP_WIDTH - 10, y: MAP_HEIGHT - 10 });
+    let joined = joinHuman(state, 'p1', 'P', { x: MAP_WIDTH - 10, y: MAP_HEIGHT - 10 });
+    expect(joined.ok).toBe(true);
+    if (!joined.ok) return;
+    joined = joinHuman(joined.state, 'p2', 'Q', { x: 100, y: 100 });
     expect(joined.ok).toBe(true);
     if (!joined.ok) return;
     state = startMatch(joined.state, 1);

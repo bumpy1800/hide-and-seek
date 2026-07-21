@@ -219,6 +219,11 @@ export function startMatch(state: MatchState, seedOrOpts: number | StartOptions 
     return startPracticeMatch(current, seed, opts.practiceRole ?? 'rabbit');
   }
 
+  // Normal hunt needs at least 2 humans (1 seeker + 1 hider); solo should use practice.
+  if (current.humans.length < 2) {
+    throw new Error('startMatch: normal mode needs at least 2 human players');
+  }
+
   const rng = createRng(seed);
   const seekerId = pickRandom(current.humans, rng);
   const rabbitUsers = Math.max(0, current.humans.length - 1);
@@ -532,11 +537,21 @@ export function livingHumanHiders(state: MatchState): EntityState[] {
 
 export function evaluateEndConditions(state: MatchState): MatchState {
   if (state.phase !== 'playing') return state;
-  if (state.mode === 'practice') return state;
+  if (state.mode === 'practice') {
+    return { ...state, phase: 'playing', winner: null, endReason: null };
+  }
 
   const hidersLeft = livingHumanHiders(state).length;
 
   if (hidersLeft === 0) {
+    // Solo seeker / no human hiders ever in the match → do not end (avoids instant seeker win)
+    const humanHiderCount = state.humans.filter((id) => {
+      const e = state.entities[id];
+      return e && e.role === 'hider';
+    }).length;
+    if (humanHiderCount === 0) {
+      return state;
+    }
     return endMatch(state, 'seekers', 'all_hiders_caught');
   }
 

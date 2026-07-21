@@ -90,11 +90,26 @@ export class Room {
       const mode: MatchMode = intent.mode === 'practice' ? 'practice' : 'normal';
       const practiceRole: PracticeRole | undefined =
         intent.practiceRole === 'fox' ? 'fox' : intent.practiceRole === 'rabbit' ? 'rabbit' : undefined;
-      this.state = startMatch(this.state, {
-        mode,
-        practiceRole,
-        seed: Date.now() ^ this.state.humans.length,
-      });
+      if (mode === 'normal' && this.state.humans.length < 2) {
+        this.send(playerId, {
+          type: 'error',
+          message: 'need_2_players_for_multiplayer',
+        });
+        return;
+      }
+      try {
+        this.state = startMatch(this.state, {
+          mode,
+          practiceRole,
+          seed: Date.now() ^ this.state.humans.length,
+        });
+      } catch (e) {
+        this.send(playerId, {
+          type: 'error',
+          message: e instanceof Error ? e.message : 'start_failed',
+        });
+        return;
+      }
       this.endedBroadcast = false;
       this.broadcastSnapshot();
       this.broadcast({

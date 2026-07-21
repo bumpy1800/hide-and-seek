@@ -11,13 +11,15 @@ import {
 } from '@hide-and-seek/shared';
 import { IntentInput } from '../input/IntentInput';
 import { GameClient } from '../net/GameClient';
+import { LocalPracticeHost } from '../net/LocalPracticeHost';
 import { getWsUrl } from '../config';
 import { buildMeadowWorld } from '../world/MeadowMap';
 
 type GameSceneData = { mode?: MatchMode; practiceRole?: PracticeRole };
 
 export class GameScene extends Phaser.Scene {
-  private client!: GameClient;
+  private client: GameClient | null = null;
+  private localPractice: LocalPracticeHost | null = null;
   private inputCtl!: IntentInput;
   private sprites = new Map<string, Phaser.GameObjects.Sprite>();
   private nameTags = new Map<string, Phaser.GameObjects.Text>();
@@ -121,57 +123,12 @@ export class GameScene extends Phaser.Scene {
 
     this.inputCtl = new IntentInput(this);
 
-    this.client = new GameClient(getWsUrl());
-    this.client.onStatus = (s) => {
-      this.statusText.setText(`Net: ${s}`);
-      if (s === 'connected') {
-        this.client.join(this.roomId, this.playerName);
-      }
-    };
-    this.client.onSnapshot = (state, you) => {
-      this.you = you;
-      this.state = state;
-      // Auto-start practice once in lobby (retry until playing — avoid start-before-join race)
-      if (this.playMode === 'practice') {
-        if (state.phase === 'playing' && state.mode === 'practice') {
-          this.autoStarted = true;
-        } else if (
-          !this.autoStarted &&
-          state.phase === 'lobby' &&
-          state.humans.includes(you)
-        ) {
-          this.client.sendIntent({
-            type: 'start',
-            mode: 'practice',
-            practiceRole: this.practiceRole,
-          });
-        }
-      }
-      this.syncSprites(state, you);
-      this.updateCameraFollow(you, state);
-      this.updatePrepOverlay(state, you);
-      this.updateHud(state, you);
-    };
-    this.client.onEvent = (event, detail) => {
-      if (event === 'error') {
-        this.statusText.setText(`Error: ${String(detail)}`);
-      } else if (event === 'match_ended') {
-        const d = detail as { winner?: string; reason?: string };
-        this.statusText.setText(`Ended — ${d.winner ?? '?'} (${d.reason ?? ''})`);
-      } else if (event === 'match_started') {
-        const d = detail as { mode?: string };
-        const pr = (detail as { practiceRole?: string }).practiceRole;
-        this.statusText.setText(
-          d.mode === 'practice'
-            ? pr === 'fox'
-              ? '여우 연습 — AI 토끼를 잡으세요!'
-              : '토끼 연습 — 여우 없이 자유롭게 움직이세요'
-            : 'Match started — 술래는 10초 준비 후 사냥!',
-        );
-        this.frozenOthers.clear();
-      }
-    };
-    this.client.connect();
+    // Practice runs 100% local (no WebSocket) so solo never depends on multiplayer host.
+    if (this.playMode === 'practice') {
+      this.bootLocalPractice();
+    } else {
+      this.bootMultiplayer();
+    }
 
     const startKey = this.input.keyboard?.addKey(Phaser.Input.Keyboard.KeyCodes.ENTER);
     startKey?.on('down', () => this.requestStart());
@@ -193,16 +150,95 @@ export class GameScene extends Phaser.Scene {
 
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.inputCtl.destroy();
-      this.client.close();
+      this.client?.close();
+      this.localPractice?.stop();
     });
   }
 
   private requestStart(): void {
-    this.client.sendIntent({
+    if (this.localPractice) {
+      // Already auto-started; ignore (or could restart)
+      return;
+    }
+    this.client?.sendIntent({
       type: 'start',
-      mode: this.playMode === 'practice' ? 'practice' : 'normal',
-      practiceRole: this.playMode === 'practice' ? this.practiceRole : undefined,
+      mode: 'normal',
     });
+  }
+
+  private bootLocalPractice(): void {
+    this.statusText.setText(
+      this.practiceRole === 'fox' ? '로컬 여우 연습' : '로컬 토끼 연습',
+    );
+    this.localPractice = new LocalPracticeHost(this.practiceRole);
+    this.localPractice.onMessage = (msg) => {
+      if (msg.type === 'welcome') {
+        this.you = msg.playerId;
+      } else if (msg.type === 'snapshot') {
+        this.you = msg.you;
+        this.state = msg.state;
+        // Hard guard: never treat practice as ended on client
+        if (this.state.mode === 'practice' && this.state.phase === 'ended') {
+          this.state = {
+            ...this.state,
+            phase: 'playing',
+            winner: null,
+            endReason: null,
+          };
+        }
+        this.syncSprites(this.state, msg.you);
+        this.updateCameraFollow(msg.you, this.state);
+        this.updatePrepOverlay(this.state, msg.you);
+        this.updateHud(this.state, msg.you);
+      } else if (msg.type === 'event') {
+        if (msg.event === 'match_started') {
+          const pr = (msg.detail as { practiceRole?: string } | undefined)?.practiceRole;
+          this.statusText.setText(
+            pr === 'fox'
+              ? '여우 연습 — AI 토끼를 잡으세요! (로컬)'
+              : '토끼 연습 — 자유롭게 움직이세요 (로컬)',
+          );
+          this.frozenOthers.clear();
+        } else if (msg.event === 'catch_success') {
+          this.statusText.setText('잡았다! AI 토끼 처치');
+        } else if (msg.event === 'error') {
+          this.statusText.setText(`Error: ${String(msg.detail ?? '')}`);
+        }
+      } else if (msg.type === 'error') {
+        this.statusText.setText(`Error: ${msg.message}`);
+      }
+    };
+    this.localPractice.start();
+  }
+
+  private bootMultiplayer(): void {
+    this.client = new GameClient(getWsUrl());
+    this.client.onStatus = (s) => {
+      this.statusText.setText(`Net: ${s}`);
+      if (s === 'connected') {
+        this.client?.join(this.roomId, this.playerName);
+      }
+    };
+    this.client.onSnapshot = (state, you) => {
+      this.you = you;
+      this.state = state;
+      this.syncSprites(state, you);
+      this.updateCameraFollow(you, state);
+      this.updatePrepOverlay(state, you);
+      this.updateHud(state, you);
+    };
+    this.client.onEvent = (event, detail) => {
+      if (event === 'error') {
+        this.statusText.setText(`Error: ${String(detail)}`);
+      } else if (event === 'match_ended') {
+        const d = detail as { winner?: string; reason?: string };
+        this.statusText.setText(`Ended — ${d.winner ?? '?'} (${d.reason ?? ''})`);
+      } else if (event === 'match_started') {
+        this.statusText.setText('Match started — 술래는 10초 준비 후 사냥!');
+        this.frozenOthers.clear();
+      }
+    };
+    this.client.connect();
   }
 
   private updatePrepOverlay(state: MatchState, you: string): void {
@@ -242,12 +278,20 @@ export class GameScene extends Phaser.Scene {
       if (intent.type === 'move') {
         if (intent.dx !== this.lastMoveSent.dx || intent.dy !== this.lastMoveSent.dy) {
           this.lastMoveSent = { dx: intent.dx, dy: intent.dy };
-          this.client.sendIntent(intent);
+          this.sendIntent(intent);
         }
       } else {
-        this.client.sendIntent(intent);
+        this.sendIntent(intent);
       }
     }
+  }
+
+  private sendIntent(intent: import('@hide-and-seek/shared').ClientIntent): void {
+    if (this.localPractice) {
+      this.localPractice.sendIntent(intent);
+      return;
+    }
+    this.client?.sendIntent(intent);
   }
 
   private syncSprites(state: MatchState, you: string): void {
@@ -344,7 +388,7 @@ export class GameScene extends Phaser.Scene {
     if (state.phase === 'lobby') {
       lines.push(state.mode === 'practice' || this.playMode === 'practice' ? '연습 시작 중…' : 'Tap START or ENTER');
     }
-    if (state.phase === 'ended') {
+    if (state.phase === 'ended' && state.mode !== 'practice') {
       lines.push(`Winner: ${state.winner} — ${state.endReason}`);
       lines.push('Tap AGAIN or ENTER to rematch');
     }

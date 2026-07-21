@@ -14,6 +14,7 @@ import {
   startMatch,
   startPracticeMatch,
   tickTimer,
+  evaluateEndConditions,
 } from '../src/index.js';
 
 describe('shouldShowMobileKeypad', () => {
@@ -232,5 +233,43 @@ describe('AI count = rabbit users × 5', () => {
     // 3 humans → 1 seeker + 2 rabbits → 10 AI
     expect(ais).toHaveLength(10);
     expect(state.config.aiCount).toBe(10);
+  });
+});
+
+describe('solo practice never ends (regression)', () => {
+  it('rabbit + fox stay playing for 200 ticks', () => {
+    for (const role of ['rabbit', 'fox'] as const) {
+      let lobby = createLobby(`solo-${role}`, defaultConfig());
+      const j = joinHuman(lobby, 'solo', 'S');
+      expect(j.ok).toBe(true);
+      if (!j.ok) return;
+      let state = startMatch(j.state, { mode: 'practice', practiceRole: role, seed: 11 });
+      expect(state.mode).toBe('practice');
+      expect(state.phase).toBe('playing');
+      for (let i = 0; i < 200; i++) {
+        state = tickTimer(state, 50);
+      }
+      expect(state.phase).toBe('playing');
+      expect(state.winner).toBeNull();
+      expect(state.mode).toBe('practice');
+    }
+  });
+});
+
+describe('evaluateEndConditions practice guard', () => {
+  it('cannot force practice into ended/seekers', () => {
+    let lobby = createLobby('g', defaultConfig());
+    const j = joinHuman(lobby, 's', 'S');
+    expect(j.ok).toBe(true);
+    if (!j.ok) return;
+    let state = startMatch(j.state, { mode: 'practice', practiceRole: 'fox', seed: 1 });
+    // corrupt winner fields and call evaluate
+    state = evaluateEndConditions({
+      ...state,
+      timeRemainingMs: 0,
+      catchBudgetRemaining: 0,
+    });
+    expect(state.phase).toBe('playing');
+    expect(state.winner).toBeNull();
   });
 });
