@@ -1,5 +1,5 @@
 {
-  "buildCommand": "npm install && npm run build -w @hide-and-seek/shared && npm run build -w @hide-and-seek/client",
+  "buildCommand": "npm install && npm run build -w @hide-and-seek/shared && VITE_WS_URL=wss://gentle-fans-wonder.loca.lt npm run build -w @hide-and-seek/client",
   "outputDirectory": "packages/client/dist",
   "installCommand": "npm install",
   "framework": null,
