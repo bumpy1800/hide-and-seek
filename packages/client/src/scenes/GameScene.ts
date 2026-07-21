@@ -8,6 +8,9 @@ import {
   type MatchMode,
   type PracticeRole,
   type MatchState,
+  facingFromVelocity,
+  facingTransform,
+  type Facing,
 } from '@hide-and-seek/shared';
 import { IntentInput } from '../input/IntentInput';
 import { GameClient } from '../net/GameClient';
@@ -39,6 +42,7 @@ export class GameScene extends Phaser.Scene {
   private autoStarted = false;
   /** Last positions shown to seeker during prep (frozen view of others). */
   private frozenOthers = new Map<string, { x: number; y: number }>();
+  private lastFacing = new Map<string, Facing>();
 
   constructor() {
     super('Game');
@@ -338,6 +342,14 @@ export class GameScene extends Phaser.Scene {
       }
       // While seeker is fully blacked out, hide other sprites under overlay anyway
       spr.setPosition(display.x, display.y);
+      // Face movement direction (up/down/left/right) from velocity
+      const prevFace = this.lastFacing.get(e.id) ?? 'down';
+      const face = facingFromVelocity(display.vx, display.vy, prevFace);
+      this.lastFacing.set(e.id, face);
+      const xf = facingTransform(face);
+      spr.setFlipX(xf.flipX);
+      spr.setFlipY(xf.flipY);
+      spr.setAngle(xf.angle);
       spr.setAlpha(e.alive ? 1 : 0.35);
       spr.setVisible(!(seekerBlind && e.id !== you));
       const tag = this.nameTags.get(e.id);
@@ -352,6 +364,7 @@ export class GameScene extends Phaser.Scene {
         this.nameTags.get(id)?.destroy();
         this.sprites.delete(id);
         this.nameTags.delete(id);
+        this.lastFacing.delete(id);
         if (this.cameraFollowId === id) {
           this.cameras.main.stopFollow();
           this.cameraFollowId = null;
@@ -373,12 +386,16 @@ export class GameScene extends Phaser.Scene {
     if (state.mode === 'practice') {
       const aiN = Object.values(state.entities).filter((e) => e.kind === 'ai' && e.alive).length;
       if (state.practiceRole === 'fox') {
-        lines.push(`여우 연습 · AI 토끼 ${aiN} · 잡기 OK · 종료 없음`);
+        lines.push(`여우 연습 · AI 토끼 ${aiN} · 종료 없음`);
+        lines.push(`잡기: 가까이 가서 Space/CATCH (자동 충돌 아님)`);
       } else {
         lines.push(`토끼 연습 · AI ${aiN} · 여우 없음 · 자유 이동`);
       }
     } else {
       lines.push(`Time ${sec}s | Catches ${state.catchBudgetRemaining}`);
+      if (state.seekerId === you && !isSeekerPrepActive(state)) {
+        lines.push(`잡기: 범위 안 Space/CATCH (자동 충돌 아님 · 범위 ${state.config.catchRange}px)`);
+      }
       if (isSeekerPrepActive(state) && state.seekerId === you) {
         lines.push(`준비 ${prepSec}s — 시야/이동 잠금`);
       } else if (isSeekerPrepActive(state)) {

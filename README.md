@@ -44,3 +44,14 @@ npm test
 docker build -t hide-and-seek .
 docker run -p 8787:8787 hide-and-seek
 ```
+
+## 여우가 토끼를 잡는 방법
+
+**자동 몸체 충돌만으로는 잡히지 않습니다.**
+
+1. 여우(술래)가 대상 근처로 이동 (범위: `CATCH_RANGE` = 48px)
+2. **Space** 또는 모바일 **CATCH** 버튼으로 잡기 시도
+3. 가장 가까운 유효 대상이 범위 안이면 성공
+   - 멀티: 인간 토끼 처치 / AI를 잡으면 횟수만 소모
+   - 여우 연습: AI 토끼 처치
+
