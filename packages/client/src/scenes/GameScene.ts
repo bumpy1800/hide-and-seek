@@ -1,8 +1,9 @@
 import Phaser from 'phaser';
-import type { EntityState, MatchState } from '@hide-and-seek/shared';
+import { MAP_HEIGHT, MAP_WIDTH, type EntityState, type MatchState } from '@hide-and-seek/shared';
 import { IntentInput } from '../input/IntentInput';
 import { GameClient } from '../net/GameClient';
 import { getWsUrl } from '../config';
+import { buildMeadowWorld } from '../world/MeadowMap';
 
 export class GameScene extends Phaser.Scene {
   private client!: GameClient;
@@ -17,6 +18,7 @@ export class GameScene extends Phaser.Scene {
   private roomId = 'lobby';
   private playerName = `Guest${Math.floor(Math.random() * 900 + 100)}`;
   private lastMoveSent = { dx: 0, dy: 0 };
+  private cameraFollowId: string | null = null;
 
   constructor() {
     super('Game');
@@ -24,18 +26,12 @@ export class GameScene extends Phaser.Scene {
 
   create(): void {
     const { width, height } = this.scale;
-    this.add.rectangle(width / 2, height / 2, width - 8, height - 8, 0x243447).setStrokeStyle(4, 0x5d6d7e);
 
-    const blocks = [
-      [240, 200, 80, 120],
-      [480, 360, 140, 60],
-      [720, 180, 70, 160],
-      [360, 480, 160, 50],
-      [600, 500, 60, 100],
-    ];
-    for (const [x, y, w, h] of blocks) {
-      this.add.rectangle(x, y, w, h, 0x34495e).setStrokeStyle(2, 0x1c2833);
-    }
+    // Expanded meadow world (tiles + animal/flora decor)
+    buildMeadowWorld(this, 7);
+
+    this.cameras.main.setBounds(0, 0, MAP_WIDTH, MAP_HEIGHT);
+    this.cameras.main.setBackgroundColor('#5d8a3e');
 
     this.hud = this.add
       .text(12, 10, '', {
@@ -56,7 +52,6 @@ export class GameScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(2000);
 
-    // Touch + mouse START / AGAIN button (dual modality with ENTER)
     const btnBg = this.add.rectangle(0, 0, 200, 52, 0x27ae60, 0.95);
     const btnLabel = this.add
       .text(0, 0, 'START', {
@@ -90,6 +85,7 @@ export class GameScene extends Phaser.Scene {
       this.you = you;
       this.state = state;
       this.syncSprites(state);
+      this.updateCameraFollow(you, state);
       this.updateHud(state, you);
     };
     this.client.onEvent = (event, detail) => {
@@ -99,7 +95,7 @@ export class GameScene extends Phaser.Scene {
         const d = detail as { winner?: string; reason?: string };
         this.statusText.setText(`Ended — ${d.winner ?? '?'} (${d.reason ?? ''})`);
       } else if (event === 'match_started') {
-        this.statusText.setText('Match started!');
+        this.statusText.setText('Match started — blend with the meadow animals!');
       }
     };
     this.client.connect();
@@ -108,9 +104,11 @@ export class GameScene extends Phaser.Scene {
     startKey?.on('down', () => this.requestStart());
 
     this.add
-      .text(width - 12, 12, 'ENTER / START: begin or rematch', {
+      .text(width - 12, 12, 'ENTER / START · camera follows you', {
         fontSize: '13px',
-        color: '#95a5a6',
+        color: '#ecf0f1',
+        backgroundColor: '#00000066',
+        padding: { x: 6, y: 4 },
       })
       .setOrigin(1, 0)
       .setScrollFactor(0)
@@ -124,6 +122,24 @@ export class GameScene extends Phaser.Scene {
 
   private requestStart(): void {
     this.client.sendIntent({ type: 'start' });
+  }
+
+  /**
+   * Keep the local player centered: camera follows their entity from snapshots.
+   */
+  private updateCameraFollow(you: string, state: MatchState): void {
+    const me = state.entities[you];
+    if (!me) return;
+    const spr = this.sprites.get(you);
+    if (!spr) {
+      this.cameras.main.centerOn(me.x, me.y);
+      return;
+    }
+    if (this.cameraFollowId !== you) {
+      this.cameras.main.startFollow(spr, true, 0.14, 0.14);
+      this.cameras.main.setFollowOffset(0, 0);
+      this.cameraFollowId = you;
+    }
   }
 
   update(): void {
@@ -148,14 +164,17 @@ export class GameScene extends Phaser.Scene {
       let spr = this.sprites.get(e.id);
       const tex = textureFor(e, state.seekerId);
       if (!spr) {
-        spr = this.add.sprite(e.x, e.y, tex);
+        spr = this.add.sprite(e.x, e.y, tex).setDepth(10);
         this.sprites.set(e.id, spr);
         const tag = this.add
-          .text(e.x, e.y - 22, labelFor(e, this.you), {
+          .text(e.x, e.y - 28, labelFor(e, this.you), {
             fontSize: '11px',
             color: '#fff',
+            backgroundColor: '#00000055',
+            padding: { x: 3, y: 1 },
           })
-          .setOrigin(0.5);
+          .setOrigin(0.5)
+          .setDepth(11);
         this.nameTags.set(e.id, tag);
       } else if (spr.texture.key !== tex) {
         spr.setTexture(tex);
@@ -163,7 +182,7 @@ export class GameScene extends Phaser.Scene {
       spr.setPosition(e.x, e.y);
       spr.setAlpha(e.alive ? 1 : 0.35);
       const tag = this.nameTags.get(e.id);
-      tag?.setPosition(e.x, e.y - 22);
+      tag?.setPosition(e.x, e.y - 28);
       tag?.setText(labelFor(e, this.you));
       tag?.setAlpha(e.alive ? 1 : 0.35);
     }
@@ -173,6 +192,10 @@ export class GameScene extends Phaser.Scene {
         this.nameTags.get(id)?.destroy();
         this.sprites.delete(id);
         this.nameTags.delete(id);
+        if (this.cameraFollowId === id) {
+          this.cameras.main.stopFollow();
+          this.cameraFollowId = null;
+        }
       }
     }
   }
@@ -183,12 +206,12 @@ export class GameScene extends Phaser.Scene {
     const sec = Math.ceil(state.timeRemainingMs / 1000);
     const humans = state.humans.length;
     const lines = [
-      `Room ${state.roomId} | ${state.phase} | Players ${humans}/${state.config.maxHumans}`,
-      `You: ${role}${state.seekerId === you ? ' (술래)' : me?.kind === 'human' ? ' (숨기)' : ''}`,
+      `Meadow ${state.roomId} | ${state.phase} | ${humans}/${state.config.maxHumans} · map ${state.config.mapWidth}×${state.config.mapHeight}`,
+      `You: ${role}${state.seekerId === you ? ' (여우 술래)' : me?.kind === 'human' ? ' (토끼 히더)' : ''}`,
       `Time ${sec}s | Catches left ${state.catchBudgetRemaining}`,
     ];
     if (state.phase === 'lobby') {
-      lines.push('Tap START or press ENTER to begin');
+      lines.push('Tap START or ENTER · camera centers on you');
     }
     if (state.phase === 'ended') {
       lines.push(`Winner: ${state.winner} — ${state.endReason}`);
@@ -206,8 +229,9 @@ export class GameScene extends Phaser.Scene {
 
 function textureFor(e: EntityState, seekerId: string | null): string {
   if (!e.alive) return 'caught';
-  if (e.id === seekerId || e.role === 'seeker') return 'seeker';
-  return 'hider';
+  if (e.id === seekerId || e.role === 'seeker') return 'seeker_fox';
+  // Human hiders + AI share identical rabbit look
+  return 'hider_rabbit';
 }
 
 function labelFor(e: EntityState, you: string | null): string {

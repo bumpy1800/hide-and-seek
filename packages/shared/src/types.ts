@@ -2,11 +2,16 @@ export const MAX_HUMAN_PLAYERS = 8;
 export const DEFAULT_TIME_LIMIT_MS = 90_000;
 export const DEFAULT_CATCH_BUDGET = 3;
 export const CATCH_RANGE = 48;
-export const PLAYER_SPEED = 160;
-export const AI_SPEED = 90;
-export const DEFAULT_AI_COUNT = 14;
-export const MAP_WIDTH = 960;
-export const MAP_HEIGHT = 640;
+export const PLAYER_SPEED = 180;
+export const AI_SPEED = 100;
+export const DEFAULT_AI_COUNT = 18;
+/** Authoritative world size — larger meadow arena */
+export const MAP_WIDTH = 2400;
+export const MAP_HEIGHT = 1600;
+/** Client camera viewport (not world size) */
+export const VIEWPORT_WIDTH = 960;
+export const VIEWPORT_HEIGHT = 640;
+export const TILE_SIZE = 64;
 
 export type EntityKind = 'human' | 'ai';
 export type Role = 'seeker' | 'hider';

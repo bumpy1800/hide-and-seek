@@ -104,8 +104,8 @@ export function joinHuman(
     return { ok: false, reason: 'room_full', state: current };
   }
 
-  const x = spawn?.x ?? 80 + current.humans.length * 40;
-  const y = spawn?.y ?? current.config.mapHeight / 2;
+  const x = spawn?.x ?? 120 + (current.humans.length % 4) * 160;
+  const y = spawn?.y ?? current.config.mapHeight * 0.35 + Math.floor(current.humans.length / 4) * 140;
   const entity: EntityState = {
     id: playerId,
     kind: 'human',
