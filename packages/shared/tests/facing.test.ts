@@ -37,38 +37,33 @@ describe('facingFromVelocity', () => {
 });
 
 describe('facingTransform', () => {
-  it('produces four pairwise-distinct transforms for rabbit base (up)', () => {
+  it('produces four pairwise-distinct transforms for base up', () => {
     expect(allFacingsDistinct('up')).toBe(true);
     const keys = ALL.map((f) => key(facingTransform(f, 'up')));
     expect(new Set(keys).size).toBe(4);
-    // right !== down (the previous bug)
     expect(key(facingTransform('right', 'up'))).not.toBe(key(facingTransform('down', 'up')));
   });
 
-  it('produces four pairwise-distinct transforms for fox base (left)', () => {
-    expect(allFacingsDistinct('left')).toBe(true);
-    const keys = ALL.map((f) => key(facingTransform(f, 'left')));
-    expect(new Set(keys).size).toBe(4);
-  });
-
-  it('maps correctly for rabbit base art facing up', () => {
-    // art faces up at 0°
+  it('maps head-at-top art so head points along movement', () => {
+    // base 'up': texture head at top → face right rotates 90° clockwise
     expect(facingTransform('up', 'up')).toEqual({ flipX: false, flipY: false, angle: 0 });
     expect(facingTransform('right', 'up')).toEqual({ flipX: false, flipY: false, angle: 90 });
     expect(facingTransform('down', 'up')).toEqual({ flipX: false, flipY: false, angle: 180 });
     expect(facingTransform('left', 'up')).toEqual({ flipX: false, flipY: false, angle: 270 });
   });
 
-  it('maps correctly for fox base art facing left', () => {
-    // art faces left at 0° — walk left keeps 0, walk right needs 180
-    expect(facingTransform('left', 'left')).toEqual({ flipX: false, flipY: false, angle: 0 });
-    expect(facingTransform('up', 'left')).toEqual({ flipX: false, flipY: false, angle: 90 });
-    expect(facingTransform('right', 'left')).toEqual({ flipX: false, flipY: false, angle: 180 });
-    expect(facingTransform('down', 'left')).toEqual({ flipX: false, flipY: false, angle: 270 });
-  });
-
-  it('baseHeadingForTexture matches meadow assets', () => {
+  it('fox uses same upright base as rabbit (head at top of seeker_fox.png)', () => {
     expect(baseHeadingForTexture('hider_rabbit')).toBe('up');
-    expect(baseHeadingForTexture('seeker_fox')).toBe('left');
+    expect(baseHeadingForTexture('seeker_fox')).toBe('up');
+    // fox right/up/down match head-toward-movement for head-at-top art
+    expect(facingTransform('right', baseHeadingForTexture('seeker_fox')).angle).toBe(90);
+    expect(facingTransform('up', baseHeadingForTexture('seeker_fox')).angle).toBe(0);
+    expect(facingTransform('down', baseHeadingForTexture('seeker_fox')).angle).toBe(180);
+    expect(facingTransform('left', baseHeadingForTexture('seeker_fox')).angle).toBe(270);
+    // still four distinct
+    const keys = ALL.map((f) =>
+      key(facingTransform(f, baseHeadingForTexture('seeker_fox'))),
+    );
+    expect(new Set(keys).size).toBe(4);
   });
 });

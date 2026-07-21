@@ -1,4 +1,4 @@
-/** Cardinal facing for top-down / side animal sprites. */
+/** Cardinal facing for top-down animal sprites. */
 export type Facing = 'up' | 'down' | 'left' | 'right';
 
 /** Which way the source texture "points" at angle 0 (no rotation). */
@@ -46,11 +46,14 @@ function transformKey(t: FacingTransform): string {
 /**
  * Map world facing → flip/angle so one texture can show all four directions.
  *
- * Uses pure rotation in 90° steps from `baseHeading` (how the art faces at angle 0):
- * - meadow rabbit (`hider_rabbit`): top-down, head toward top of image → base `'up'`
- * - meadow fox (`seeker_fox`): side profile head toward left → base `'left'`
+ * Meadow rabbit + fox PNGs are both upright with the head toward the **top**
+ * of the texture (base heading `'up'`). Rotation from that base:
+ * - up → 0°
+ * - right → 90°
+ * - down → 180°
+ * - left → 270°
  *
- * All four facings produce distinct transforms (pairwise unique angle for a given base).
+ * All four facings produce pairwise-distinct transforms.
  */
 export function facingTransform(
   facing: Facing,
@@ -58,18 +61,17 @@ export function facingTransform(
 ): FacingTransform {
   const targetIdx = CLOCKWISE.indexOf(facing);
   const baseIdx = CLOCKWISE.indexOf(baseHeading);
-  // Steps clockwise from base art heading to desired world facing
   const steps = (targetIdx - baseIdx + 4) % 4;
   const angle = steps * 90;
   return { flipX: false, flipY: false, angle };
 }
 
-/** Base heading baked into our meadow character textures. */
+/**
+ * Base heading baked into meadow character textures.
+ * Both hider_rabbit and seeker_fox have head toward top of the image.
+ */
 export function baseHeadingForTexture(textureKey: string): BaseHeading {
-  if (textureKey.includes('fox') || textureKey === 'seeker' || textureKey.includes('seeker')) {
-    return 'left';
-  }
-  // rabbit / hider top-down art faces up (head at top of image)
+  void textureKey;
   return 'up';
 }
 
