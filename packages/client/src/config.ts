@@ -4,16 +4,35 @@ import { BootScene } from './scenes/BootScene';
 import { MenuScene } from './scenes/MenuScene';
 import { GameScene } from './scenes/GameScene';
 
+/** Cap DPR so canvas stays sharp on retina without extreme GPU cost. */
+function gameResolution(): number {
+  if (typeof window === 'undefined') return 1;
+  const dpr = window.devicePixelRatio || 1;
+  return Math.min(Math.max(dpr, 1), 2);
+}
+
 export function createGameConfig(parent: string | HTMLElement): Phaser.Types.Core.GameConfig {
-  return {
+  const resolution = gameResolution();
+  // resolution is supported at runtime for HiDPI; some Phaser type packages omit it
+  const config = {
     type: Phaser.AUTO,
     parent,
     width: VIEWPORT_WIDTH,
     height: VIEWPORT_HEIGHT,
     backgroundColor: '#5d8a3e',
+    resolution,
+    render: {
+      antialias: true,
+      antialiasGL: true,
+      roundPixels: true,
+      pixelArt: false,
+      powerPreference: 'high-performance' as const,
+      transparent: false,
+    },
     scale: {
       mode: Phaser.Scale.FIT,
       autoCenter: Phaser.Scale.CENTER_BOTH,
+      autoRound: true,
     },
     physics: {
       default: 'arcade',
@@ -23,7 +42,12 @@ export function createGameConfig(parent: string | HTMLElement): Phaser.Types.Cor
     input: {
       activePointers: 3,
     },
+    fps: {
+      target: 60,
+      forceSetTimeOut: false,
+    },
   };
+  return config as Phaser.Types.Core.GameConfig;
 }
 
 export function getWsUrl(): string {

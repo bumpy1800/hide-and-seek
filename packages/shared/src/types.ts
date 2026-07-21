@@ -15,9 +15,9 @@ export const SEEKER_PREP_MS = 10_000;
 /** World size (~1080p meadow arena) */
 export const MAP_WIDTH = 1920;
 export const MAP_HEIGHT = 1080;
-/** Client camera viewport (not world size) */
-export const VIEWPORT_WIDTH = 960;
-export const VIEWPORT_HEIGHT = 540;
+/** Client camera viewport — match map / 1080p for sharp 1:1 on FHD */
+export const VIEWPORT_WIDTH = 1920;
+export const VIEWPORT_HEIGHT = 1080;
 export const TILE_SIZE = 64;
 
 export type EntityKind = 'human' | 'ai';

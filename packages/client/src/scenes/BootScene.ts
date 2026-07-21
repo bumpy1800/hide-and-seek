@@ -22,18 +22,28 @@ export class BootScene extends Phaser.Scene {
   }
 
   create(): void {
-    this.ensureFallback('grass_tile', 64, 0x6aa84f);
-    this.ensureFallback('grass_tile_b', 64, 0x74b356);
+    // Linear filter + higher-res assets → smoother scale on high-DPI
+    for (const key of Object.keys(this.textures.list)) {
+      if (key === '__DEFAULT' || key === '__MISSING') continue;
+      try {
+        this.textures.get(key).setFilter(Phaser.Textures.FilterMode.LINEAR);
+      } catch {
+        /* ignore */
+      }
+    }
+
+    this.ensureFallback('grass_tile', 128, 0x6aa84f);
+    this.ensureFallback('grass_tile_b', 128, 0x74b356);
     for (const key of allAnimalTextureKeys()) {
       const isFox = key.includes('fox');
-      this.ensureFallback(key, 56, isFox ? 0xe67e22 : 0xd4b896);
+      this.ensureFallback(key, 128, isFox ? 0xe67e22 : 0xd4b896);
     }
-    this.ensureFallback('hider_rabbit', 48, 0xd4b896);
-    this.ensureFallback('seeker_fox', 52, 0xe67e22);
-    this.ensureFallback('prop_bush', 72, 0x3d8b40);
-    this.ensureFallback('prop_tree', 96, 0x2e7d32);
-    this.ensureFallback('prop_rock', 64, 0x7f8c8d);
-    this.ensureFallback('caught', 48, 0x95a5a6);
+    this.ensureFallback('hider_rabbit', 128, 0xd4b896);
+    this.ensureFallback('seeker_fox', 128, 0xe67e22);
+    this.ensureFallback('prop_bush', 128, 0x3d8b40);
+    this.ensureFallback('prop_tree', 160, 0x2e7d32);
+    this.ensureFallback('prop_rock', 112, 0x7f8c8d);
+    this.ensureFallback('caught', 96, 0x95a5a6);
     this.scene.start('Menu');
   }
 

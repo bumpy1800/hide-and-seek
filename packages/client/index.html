@@ -22,10 +22,16 @@
       #app {
         width: 100%;
         height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
       }
-      canvas {
+      /* Prefer crisp scaling when browser upscales the canvas */
+      #app canvas {
         display: block;
         margin: 0 auto;
+        image-rendering: auto;
+        -webkit-font-smoothing: antialiased;
       }
     </style>
   </head>
