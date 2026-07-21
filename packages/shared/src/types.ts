@@ -12,10 +12,12 @@ export const AI_SPEED = RABBIT_SPEED;
 export const SEEKER_SPEED = 160;
 export const DEFAULT_AI_COUNT = 18;
 export const SEEKER_PREP_MS = 10_000;
-export const MAP_WIDTH = 2400;
-export const MAP_HEIGHT = 1600;
+/** World size (~1080p meadow arena) */
+export const MAP_WIDTH = 1920;
+export const MAP_HEIGHT = 1080;
+/** Client camera viewport (not world size) */
 export const VIEWPORT_WIDTH = 960;
-export const VIEWPORT_HEIGHT = 640;
+export const VIEWPORT_HEIGHT = 540;
 export const TILE_SIZE = 64;
 
 export type EntityKind = 'human' | 'ai';

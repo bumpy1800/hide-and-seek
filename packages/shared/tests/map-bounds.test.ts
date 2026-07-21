@@ -14,8 +14,8 @@ describe('expanded meadow map bounds', () => {
   it('exposes world larger than legacy 960×640', () => {
     expect(MAP_WIDTH).toBeGreaterThan(960);
     expect(MAP_HEIGHT).toBeGreaterThan(640);
-    expect(MAP_WIDTH).toBe(2400);
-    expect(MAP_HEIGHT).toBe(1600);
+    expect(MAP_WIDTH).toBe(1920);
+    expect(MAP_HEIGHT).toBe(1080);
     const cfg = defaultConfig();
     expect(cfg.mapWidth).toBe(MAP_WIDTH);
     expect(cfg.mapHeight).toBe(MAP_HEIGHT);
