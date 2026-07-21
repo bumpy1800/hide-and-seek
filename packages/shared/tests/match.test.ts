@@ -184,3 +184,29 @@ describe('timer and catch budget', () => {
     }
   });
 });
+
+describe('rematch and rejoin after ended', () => {
+  it('returnToLobby keeps humans and allows startMatch again', () => {
+    let lobby = createLobby('r-rematch', defaultConfig({ aiCount: 2, timeLimitMs: 100 }));
+    let res = joinHuman(lobby, 'a', 'A');
+    res = joinHuman(res.ok ? res.state : lobby, 'b', 'B');
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    let state = startMatch(res.state, 5);
+    state = tickTimer(state, 100);
+    expect(state.phase).toBe('ended');
+
+    // join after ended should succeed (auto lobby)
+    const rejoin = joinHuman(state, 'c', 'C');
+    expect(rejoin.ok).toBe(true);
+    if (!rejoin.ok) return;
+    expect(rejoin.state.phase).toBe('lobby');
+    expect(rejoin.state.humans).toContain('c');
+
+    // start from ended without explicit join path
+    state = startMatch(state, 8);
+    expect(state.phase).toBe('playing');
+    expect(state.seekerId).toBeTruthy();
+    expect(Object.values(state.entities).some((e) => e.kind === 'ai')).toBe(true);
+  });
+});

@@ -47,7 +47,40 @@ export type JoinResult =
   | { ok: false; reason: string; state: MatchState };
 
 export function canJoin(state: MatchState): boolean {
-  return state.phase === 'lobby' && state.humans.length < state.config.maxHumans;
+  // Lobby always; ended rooms auto-reset on join so rematches work without server restart.
+  if (state.phase === 'playing') return false;
+  if (state.phase === 'ended') return state.humans.length < state.config.maxHumans;
+  return state.humans.length < state.config.maxHumans;
+}
+
+/**
+ * Strip AI, revive humans as hiders, clear match result — keep connected humans.
+ */
+export function returnToLobby(state: MatchState): MatchState {
+  const entities: Record<string, EntityState> = {};
+  for (const id of state.humans) {
+    const prev = state.entities[id];
+    if (!prev) continue;
+    entities[id] = {
+      ...prev,
+      kind: 'human',
+      role: 'hider',
+      alive: true,
+      vx: 0,
+      vy: 0,
+    };
+  }
+  return {
+    ...state,
+    phase: 'lobby',
+    seekerId: null,
+    entities,
+    catchBudgetRemaining: state.config.catchBudget,
+    timeRemainingMs: state.config.timeLimitMs,
+    winner: null,
+    endReason: null,
+    tick: 0,
+  };
 }
 
 export function joinHuman(
@@ -56,18 +89,23 @@ export function joinHuman(
   name: string,
   spawn?: { x: number; y: number },
 ): JoinResult {
-  if (state.phase !== 'lobby') {
-    return { ok: false, reason: 'match_already_started', state };
+  let current = state;
+  // After a match ends (or stuck non-lobby), open lobby so refresh/rematch can rejoin.
+  if (current.phase === 'ended') {
+    current = returnToLobby(current);
   }
-  if (state.humans.includes(playerId)) {
-    return { ok: true, state, playerId };
+  if (current.phase !== 'lobby') {
+    return { ok: false, reason: 'match_already_started', state: current };
   }
-  if (state.humans.length >= state.config.maxHumans) {
-    return { ok: false, reason: 'room_full', state };
+  if (current.humans.includes(playerId)) {
+    return { ok: true, state: current, playerId };
+  }
+  if (current.humans.length >= current.config.maxHumans) {
+    return { ok: false, reason: 'room_full', state: current };
   }
 
-  const x = spawn?.x ?? 80 + state.humans.length * 40;
-  const y = spawn?.y ?? state.config.mapHeight / 2;
+  const x = spawn?.x ?? 80 + current.humans.length * 40;
+  const y = spawn?.y ?? current.config.mapHeight / 2;
   const entity: EntityState = {
     id: playerId,
     kind: 'human',
@@ -84,9 +122,9 @@ export function joinHuman(
     ok: true,
     playerId,
     state: {
-      ...state,
-      humans: [...state.humans, playerId],
-      entities: { ...state.entities, [playerId]: entity },
+      ...current,
+      humans: [...current.humans, playerId],
+      entities: { ...current.entities, [playerId]: entity },
     },
   };
 }
@@ -94,10 +132,15 @@ export function joinHuman(
 export function leaveHuman(state: MatchState, playerId: string): MatchState {
   if (!state.humans.includes(playerId)) return state;
   const { [playerId]: _removed, ...rest } = state.entities;
+  // Drop AI when last human leaves mid-lobby; keep non-human only during play
+  const entities =
+    state.phase === 'lobby'
+      ? Object.fromEntries(Object.entries(rest).filter(([, e]) => e.kind === 'human'))
+      : rest;
   const next: MatchState = {
     ...state,
     humans: state.humans.filter((id) => id !== playerId),
-    entities: rest,
+    entities,
   };
   if (next.phase === 'playing') {
     return evaluateEndConditions(next);
@@ -107,63 +150,66 @@ export function leaveHuman(state: MatchState, playerId: string): MatchState {
 
 /**
  * Assign a random seeker among joined humans and spawn AI crowd.
- * Seedable for tests.
+ * Seedable for tests. Accepts lobby, or ended (auto returnToLobby first).
  */
 export function startMatch(state: MatchState, seed: number = Date.now()): MatchState {
-  if (state.phase !== 'lobby') {
+  let current = state;
+  if (current.phase === 'ended') {
+    current = returnToLobby(current);
+  }
+  if (current.phase !== 'lobby') {
     throw new Error('startMatch: not in lobby');
   }
-  if (state.humans.length < 1) {
+  if (current.humans.length < 1) {
     throw new Error('startMatch: need at least 1 human');
   }
 
   const rng = createRng(seed);
-  const seekerId = pickRandom(state.humans, rng);
+  const seekerId = pickRandom(current.humans, rng);
   const entities: Record<string, EntityState> = {};
 
-  for (const id of state.humans) {
-    const prev = state.entities[id]!;
+  for (const id of current.humans) {
+    const prev = current.entities[id]!;
     entities[id] = {
       ...prev,
       role: id === seekerId ? 'seeker' : 'hider',
       alive: true,
       vx: 0,
       vy: 0,
-      x: clamp(prev.x, 24, state.config.mapWidth - 24),
-      y: clamp(prev.y, 24, state.config.mapHeight - 24),
+      x: clamp(prev.x, 24, current.config.mapWidth - 24),
+      y: clamp(prev.y, 24, current.config.mapHeight - 24),
     };
   }
 
-  for (let i = 0; i < state.config.aiCount; i++) {
+  for (let i = 0; i < current.config.aiCount; i++) {
     const id = `ai-${i}`;
     entities[id] = {
       id,
       kind: 'ai',
       role: 'hider',
       name: `NPC-${i}`,
-      x: 40 + rng() * (state.config.mapWidth - 80),
-      y: 40 + rng() * (state.config.mapHeight - 80),
+      x: 40 + rng() * (current.config.mapWidth - 80),
+      y: 40 + rng() * (current.config.mapHeight - 80),
       vx: 0,
       vy: 0,
       alive: true,
     };
   }
 
-  // Nudge seeker to opposite side for fairness
   const seeker = entities[seekerId]!;
   entities[seekerId] = {
     ...seeker,
-    x: state.config.mapWidth * 0.15,
-    y: state.config.mapHeight * 0.5,
+    x: current.config.mapWidth * 0.15,
+    y: current.config.mapHeight * 0.5,
   };
 
   return {
-    ...state,
+    ...current,
     phase: 'playing',
     seekerId,
     entities,
-    catchBudgetRemaining: state.config.catchBudget,
-    timeRemainingMs: state.config.timeLimitMs,
+    catchBudgetRemaining: current.config.catchBudget,
+    timeRemainingMs: current.config.timeLimitMs,
     winner: null,
     endReason: null,
     tick: 0,
@@ -202,11 +248,9 @@ export function attemptCatch(state: MatchState, seekerId: string, targetId: stri
     return { ok: false, reason: 'out_of_range', state };
   }
 
-  // Spending a catch attempt always consumes budget (wrong guess costs).
   const budget = state.catchBudgetRemaining - 1;
 
   if (target.kind === 'ai') {
-    // AI is not eliminable as a player — budget wasted.
     let next: MatchState = {
       ...state,
       catchBudgetRemaining: budget,
@@ -215,7 +259,6 @@ export function attemptCatch(state: MatchState, seekerId: string, targetId: stri
     return { ok: false, reason: 'target_is_ai', state: next };
   }
 
-  // Human hider caught
   const entities = {
     ...state.entities,
     [targetId]: { ...target, alive: false, vx: 0, vy: 0 },
@@ -286,8 +329,6 @@ export function evaluateEndConditions(state: MatchState): MatchState {
     return endMatch(state, 'hiders', 'time_expired');
   }
 
-  // If seeker spent all catches and cannot catch remaining hiders, hiders win
-  // only when budget is 0 and at least one hider still alive.
   if (state.catchBudgetRemaining <= 0) {
     return endMatch(state, 'hiders', 'catch_budget_exhausted');
   }

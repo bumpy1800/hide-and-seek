@@ -91,3 +91,41 @@ describe('multiplayer room host (in-process dual clients)', () => {
     expect(catchSnap.state.catchBudgetRemaining).toBeLessThan(room.state.config.catchBudget);
   });
 });
+
+describe('rematch after match ends', () => {
+  it('start intent after ended begins a new match for both clients', () => {
+    const manager = new RoomManager();
+    const a = new FakeSocket();
+    const b = new FakeSocket();
+    manager.joinRoom('rematch-room', 'p1', a, 'A');
+    manager.joinRoom('rematch-room', 'p2', b, 'B');
+    const room = manager.get('rematch-room')!;
+    room.applyIntent('p1', { type: 'start' });
+    expect(room.state.phase).toBe('playing');
+
+    // Force end
+    room.state = { ...room.state, timeRemainingMs: 0 };
+    room.tick(50);
+    expect(room.state.phase).toBe('ended');
+
+    a.messages = [];
+    b.messages = [];
+    room.applyIntent('p2', { type: 'start' });
+    expect(room.state.phase).toBe('playing');
+    const snapA = a.lastSnapshot();
+    const snapB = b.lastSnapshot();
+    expect(snapA?.state.phase).toBe('playing');
+    expect(snapB?.state.phase).toBe('playing');
+    expect(snapA?.state.seekerId).toBe(snapB?.state.seekerId);
+
+    // New joiner after end (via another end cycle)
+    room.state = { ...room.state, timeRemainingMs: 0 };
+    room.tick(50);
+    expect(room.state.phase).toBe('ended');
+    const c = new FakeSocket();
+    const joined = manager.joinRoom('rematch-room', 'p3', c, 'C');
+    expect(joined.message.type).toBe('welcome');
+    expect(room.state.phase).toBe('lobby');
+    expect(room.state.humans).toContain('p3');
+  });
+});

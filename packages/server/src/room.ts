@@ -7,6 +7,8 @@ import {
   joinHuman,
   leaveHuman,
   nearestCatchTarget,
+  resetAiBrains,
+  returnToLobby,
   setEntityVelocity,
   startMatch,
   stepAiCrowd,
@@ -29,6 +31,7 @@ export class Room {
   state: MatchState;
   private clients = new Map<string, SocketLike>();
   private names = new Map<string, string>();
+  private endedBroadcast = false;
 
   constructor(id: string) {
     this.id = id;
@@ -71,10 +74,18 @@ export class Room {
 
   applyIntent(playerId: string, intent: ClientIntent): void {
     if (intent.type === 'start') {
+      // Lobby start or rematch after ended
+      if (this.state.phase === 'playing') return;
+      if (this.state.phase === 'ended') {
+        this.state = returnToLobby(this.state);
+        resetAiBrains(this.id);
+        this.endedBroadcast = false;
+      }
       if (this.state.phase !== 'lobby') return;
       if (this.state.humans.length < 1) return;
-      // Anyone in lobby can start for prototype simplicity
+      resetAiBrains(this.id);
       this.state = startMatch(this.state, Date.now() ^ this.state.humans.length);
+      this.endedBroadcast = false;
       this.broadcastSnapshot();
       this.broadcast({ type: 'event', event: 'match_started', detail: { seekerId: this.state.seekerId } });
       return;
@@ -88,7 +99,6 @@ export class Room {
       const len = Math.hypot(intent.dx, intent.dy) || 1;
       const nx = intent.dx / len;
       const ny = intent.dy / len;
-      // normalize zero
       const speed = PLAYER_SPEED;
       const vx = intent.dx === 0 && intent.dy === 0 ? 0 : nx * speed;
       const vy = intent.dx === 0 && intent.dy === 0 ? 0 : ny * speed;
@@ -111,17 +121,21 @@ export class Room {
         detail: result,
       });
       this.broadcastSnapshot();
+      if (this.state.phase === 'ended') {
+        resetAiBrains(this.id);
+      }
     }
   }
 
-  /** Fixed-step simulation tick (server authoritative). */
   tick(dtMs: number): void {
     if (this.state.phase !== 'playing') return;
     this.state = stepAiCrowd(this.state, dtMs, this.state.tick + 1);
     this.state = integrateMotion(this.state, dtMs / 1000);
     this.state = tickTimer(this.state, dtMs);
     this.broadcastSnapshot();
-    if (this.state.phase === 'ended') {
+    if (this.state.phase === 'ended' && !this.endedBroadcast) {
+      this.endedBroadcast = true;
+      resetAiBrains(this.id);
       this.broadcast({
         type: 'event',
         event: 'match_ended',
@@ -167,7 +181,6 @@ export class RoomManager {
     return this.rooms.get(roomId);
   }
 
-  /** Join default room or specified; auto-create. */
   joinRoom(roomId: string | undefined, playerId: string, socket: SocketLike, name?: string) {
     const id = roomId && roomId.trim() ? roomId.trim() : 'lobby';
     const room = this.getOrCreate(id);

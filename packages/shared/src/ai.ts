@@ -8,10 +8,28 @@ type AiBrain = {
   idleMs: number;
 };
 
+/** Keyed by `${roomId}:${entityId}` so concurrent rooms never share brains. */
 const brains = new Map<string, AiBrain>();
 
-export function resetAiBrains(): void {
-  brains.clear();
+function brainKey(roomId: string, entityId: string): string {
+  return `${roomId}:${entityId}`;
+}
+
+/** Clear all brains, or only those belonging to a room. */
+export function resetAiBrains(roomId?: string): void {
+  if (!roomId) {
+    brains.clear();
+    return;
+  }
+  const prefix = `${roomId}:`;
+  for (const key of [...brains.keys()]) {
+    if (key.startsWith(prefix)) brains.delete(key);
+  }
+}
+
+/** Test helper: whether a brain exists for room+entity. */
+export function hasAiBrain(roomId: string, entityId: string): boolean {
+  return brains.has(brainKey(roomId, entityId));
 }
 
 /**
@@ -21,17 +39,19 @@ export function stepAiCrowd(state: MatchState, dtMs: number, seed = 1): MatchSta
   if (state.phase !== 'playing') return state;
   const rng = createRng(seed + state.tick);
   const entities: Record<string, EntityState> = { ...state.entities };
+  const roomId = state.roomId;
 
   for (const e of Object.values(state.entities)) {
     if (e.kind !== 'ai' || !e.alive) continue;
-    let brain = brains.get(e.id);
+    const key = brainKey(roomId, e.id);
+    let brain = brains.get(key);
     if (!brain || brain.idleMs <= 0) {
       brain = {
         targetX: 40 + rng() * (state.config.mapWidth - 80),
         targetY: 40 + rng() * (state.config.mapHeight - 80),
         idleMs: 400 + rng() * 1800,
       };
-      brains.set(e.id, brain);
+      brains.set(key, brain);
     }
 
     const dx = brain.targetX - e.x;
@@ -43,7 +63,6 @@ export function stepAiCrowd(state: MatchState, dtMs: number, seed = 1): MatchSta
     } else {
       const nx = dx / dist;
       const ny = dy / dist;
-      // slight speed variance so motion is not perfectly uniform
       const speed = AI_SPEED * (0.75 + rng() * 0.5);
       entities[e.id] = { ...e, vx: nx * speed, vy: ny * speed };
     }
