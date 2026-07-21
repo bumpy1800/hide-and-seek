@@ -6,6 +6,7 @@ import {
   isSeekerPrepActive,
   type EntityState,
   type MatchMode,
+  type PracticeRole,
   type MatchState,
 } from '@hide-and-seek/shared';
 import { IntentInput } from '../input/IntentInput';
@@ -13,7 +14,7 @@ import { GameClient } from '../net/GameClient';
 import { getWsUrl } from '../config';
 import { buildMeadowWorld } from '../world/MeadowMap';
 
-type GameSceneData = { mode?: MatchMode };
+type GameSceneData = { mode?: MatchMode; practiceRole?: PracticeRole };
 
 export class GameScene extends Phaser.Scene {
   private client!: GameClient;
@@ -29,6 +30,7 @@ export class GameScene extends Phaser.Scene {
   private state: MatchState | null = null;
   private roomId = 'lobby';
   private playMode: MatchMode = 'normal';
+  private practiceRole: PracticeRole = 'rabbit';
   private playerName = `Guest${Math.floor(Math.random() * 900 + 100)}`;
   private lastMoveSent = { dx: 0, dy: 0 };
   private cameraFollowId: string | null = null;
@@ -42,10 +44,11 @@ export class GameScene extends Phaser.Scene {
 
   init(data: GameSceneData): void {
     this.playMode = data.mode === 'practice' ? 'practice' : 'normal';
+    this.practiceRole = data.practiceRole === 'fox' ? 'fox' : 'rabbit';
     // Unique practice room so solo practice never collides with others / leftover state
     this.roomId =
       this.playMode === 'practice'
-        ? `practice-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+        ? `practice-${this.practiceRole}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
         : 'lobby';
     this.autoStarted = false;
     this.frozenOthers.clear();
@@ -137,7 +140,11 @@ export class GameScene extends Phaser.Scene {
           state.phase === 'lobby' &&
           state.humans.includes(you)
         ) {
-          this.client.sendIntent({ type: 'start', mode: 'practice' });
+          this.client.sendIntent({
+            type: 'start',
+            mode: 'practice',
+            practiceRole: this.practiceRole,
+          });
         }
       }
       this.syncSprites(state, you);
@@ -153,9 +160,12 @@ export class GameScene extends Phaser.Scene {
         this.statusText.setText(`Ended — ${d.winner ?? '?'} (${d.reason ?? ''})`);
       } else if (event === 'match_started') {
         const d = detail as { mode?: string };
+        const pr = (detail as { practiceRole?: string }).practiceRole;
         this.statusText.setText(
           d.mode === 'practice'
-            ? '연습 모드 — AI 토끼 움직임에 맞춰 보세요'
+            ? pr === 'fox'
+              ? '여우 연습 — AI 토끼를 잡으세요!'
+              : '토끼 연습 — 여우 없이 자유롭게 움직이세요'
             : 'Match started — 술래는 10초 준비 후 사냥!',
         );
         this.frozenOthers.clear();
@@ -167,7 +177,11 @@ export class GameScene extends Phaser.Scene {
     startKey?.on('down', () => this.requestStart());
 
     this.add
-      .text(width - 12, 12, this.playMode === 'practice' ? '연습 모드' : 'ENTER / START', {
+      .text(width - 12, 12, this.playMode === 'practice'
+        ? this.practiceRole === 'fox'
+          ? '연습·여우'
+          : '연습·토끼'
+        : 'ENTER / START', {
         fontSize: '13px',
         color: '#ecf0f1',
         backgroundColor: '#00000066',
@@ -187,6 +201,7 @@ export class GameScene extends Phaser.Scene {
     this.client.sendIntent({
       type: 'start',
       mode: this.playMode === 'practice' ? 'practice' : 'normal',
+      practiceRole: this.playMode === 'practice' ? this.practiceRole : undefined,
     });
   }
 
@@ -312,8 +327,12 @@ export class GameScene extends Phaser.Scene {
       `You: ${role}${state.seekerId === you ? ' (여우 술래)' : me?.kind === 'human' ? ' (토끼)' : ''}`,
     ];
     if (state.mode === 'practice') {
-      const aiN = Object.values(state.entities).filter((e) => e.kind === 'ai').length;
-      lines.push(`AI 토끼 ${aiN}마리 연습 · 술래 없음 · 혼자 가능`);
+      const aiN = Object.values(state.entities).filter((e) => e.kind === 'ai' && e.alive).length;
+      if (state.practiceRole === 'fox') {
+        lines.push(`여우 연습 · AI 토끼 ${aiN} · 잡기 OK · 종료 없음`);
+      } else {
+        lines.push(`토끼 연습 · AI ${aiN} · 여우 없음 · 자유 이동`);
+      }
     } else {
       lines.push(`Time ${sec}s | Catches ${state.catchBudgetRemaining}`);
       if (isSeekerPrepActive(state) && state.seekerId === you) {
@@ -333,9 +352,9 @@ export class GameScene extends Phaser.Scene {
 
     const showCatch =
       state.phase === 'playing' &&
-      state.mode === 'normal' &&
       state.seekerId === you &&
-      !isSeekerPrepActive(state);
+      !isSeekerPrepActive(state) &&
+      (state.mode === 'normal' || state.practiceRole === 'fox');
     this.inputCtl.setCatchVisible(showCatch);
 
     const showStart =

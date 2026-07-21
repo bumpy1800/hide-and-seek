@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import type { MatchMode } from '@hide-and-seek/shared';
+import type { MatchMode, PracticeRole } from '@hide-and-seek/shared';
 
 export class MenuScene extends Phaser.Scene {
   constructor() {
@@ -18,8 +18,8 @@ export class MenuScene extends Phaser.Scene {
     }
 
     this.add
-      .text(width / 2, height * 0.16, 'MEADOW HIDE & SEEK', {
-        fontSize: '40px',
+      .text(width / 2, height * 0.12, 'MEADOW HIDE & SEEK', {
+        fontSize: '38px',
         color: '#fff8e7',
         fontStyle: 'bold',
         stroke: '#2d4a1c',
@@ -30,18 +30,30 @@ export class MenuScene extends Phaser.Scene {
     this.add
       .text(
         width / 2,
-        height * 0.32,
-        '토끼들 사이에 섞이세요.\n여우 술래는 10초 준비 후 사냥을 시작합니다.\n연습 모드로 AI 움직임만 익힐 수 있습니다.',
-        { fontSize: '17px', color: '#f5f5dc', align: 'center', lineSpacing: 8 },
+        height * 0.26,
+        '멀티: PLAY · 혼자 연습: 토끼 / 여우 선택',
+        { fontSize: '16px', color: '#f5f5dc', align: 'center' },
       )
       .setOrigin(0.5);
 
-    this.makeButton(width / 2, height * 0.58, 240, 54, 0x27ae60, 'PLAY', () =>
+    this.makeButton(width / 2, height * 0.42, 260, 52, 0x27ae60, 'PLAY (멀티)', () =>
       this.go('normal'),
     );
-    this.makeButton(width / 2, height * 0.72, 240, 54, 0x2980b9, '연습 모드', () =>
-      this.go('practice'),
+    this.makeButton(width / 2, height * 0.56, 260, 52, 0x3498db, '연습 · 토끼', () =>
+      this.go('practice', 'rabbit'),
     );
+    this.makeButton(width / 2, height * 0.68, 260, 52, 0xe67e22, '연습 · 여우', () =>
+      this.go('practice', 'fox'),
+    );
+
+    this.add
+      .text(
+        width / 2,
+        height * 0.84,
+        '토끼: 여우 없이 이동 연습\n여우: AI 토끼를 잡는 연습',
+        { fontSize: '15px', color: '#ecf0f1', align: 'center', lineSpacing: 6 },
+      )
+      .setOrigin(0.5);
 
     this.input.keyboard?.once('keydown-ENTER', () => this.go('normal'));
   }
@@ -57,12 +69,12 @@ export class MenuScene extends Phaser.Scene {
   ): void {
     const btn = this.add.rectangle(x, y, w, h, color).setInteractive({ useHandCursor: true });
     this.add
-      .text(x, y, label, { fontSize: '22px', color: '#fff', fontStyle: 'bold' })
+      .text(x, y, label, { fontSize: '20px', color: '#fff', fontStyle: 'bold' })
       .setOrigin(0.5);
     btn.on('pointerdown', onClick);
   }
 
-  private go(mode: MatchMode): void {
-    this.scene.start('Game', { mode });
+  private go(mode: MatchMode, practiceRole?: PracticeRole): void {
+    this.scene.start('Game', { mode, practiceRole });
   }
 }

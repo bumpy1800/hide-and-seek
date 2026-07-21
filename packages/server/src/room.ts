@@ -18,6 +18,7 @@ import {
   type ClientIntent,
   type ClientMessage,
   type MatchMode,
+  type PracticeRole,
   type MatchState,
   type ServerMessage,
 } from '@hide-and-seek/shared';
@@ -87,13 +88,23 @@ export class Room {
       if (this.state.humans.length < 1) return;
       resetAiBrains(this.id);
       const mode: MatchMode = intent.mode === 'practice' ? 'practice' : 'normal';
-      this.state = startMatch(this.state, { mode, seed: Date.now() ^ this.state.humans.length });
+      const practiceRole: PracticeRole | undefined =
+        intent.practiceRole === 'fox' ? 'fox' : intent.practiceRole === 'rabbit' ? 'rabbit' : undefined;
+      this.state = startMatch(this.state, {
+        mode,
+        practiceRole,
+        seed: Date.now() ^ this.state.humans.length,
+      });
       this.endedBroadcast = false;
       this.broadcastSnapshot();
       this.broadcast({
         type: 'event',
         event: 'match_started',
-        detail: { seekerId: this.state.seekerId, mode: this.state.mode },
+        detail: {
+          seekerId: this.state.seekerId,
+          mode: this.state.mode,
+          practiceRole: this.state.practiceRole,
+        },
       });
       return;
     }

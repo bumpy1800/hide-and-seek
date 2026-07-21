@@ -44,28 +44,66 @@ describe('shouldShowMobileKeypad', () => {
 });
 
 describe('practice mode', () => {
-  it('starts without seeker and disables catch hunt rules', () => {
-    let lobby = createLobby('p', defaultConfig({ aiCount: 3 }));
+  it('rabbit practice: no seeker, free move, no catch, no auto-end', () => {
+    let lobby = createLobby('p', defaultConfig());
     const joined = joinHuman(lobby, 'h1', 'Hider');
     expect(joined.ok).toBe(true);
     if (!joined.ok) return;
-    const state = startPracticeMatch(joined.state, 3);
+    let state = startPracticeMatch(joined.state, 3, 'rabbit');
     expect(state.mode).toBe('practice');
+    expect(state.practiceRole).toBe('rabbit');
     expect(state.seekerId).toBeNull();
     expect(state.phase).toBe('playing');
     expect(state.seekerPrepRemainingMs).toBe(0);
     for (const id of state.humans) {
       expect(state.entities[id]!.role).toBe('hider');
     }
-    expect(Object.values(state.entities).some((e) => e.kind === 'ai')).toBe(true);
+    const ais = Object.values(state.entities).filter((e) => e.kind === 'ai');
+    expect(ais).toHaveLength(5);
 
-    const viaStart = startMatch(joined.state, { mode: 'practice', seed: 3 });
+    const viaStart = startMatch(joined.state, { mode: 'practice', practiceRole: 'rabbit', seed: 3 });
     expect(viaStart.seekerId).toBeNull();
     expect(viaStart.mode).toBe('practice');
 
-    const catchRes = attemptCatch(state, 'h1', Object.keys(state.entities)[0]!);
+    const catchRes = attemptCatch(state, 'h1', ais[0]!.id);
     expect(catchRes.ok).toBe(false);
     if (!catchRes.ok) expect(catchRes.reason).toBe('practice_no_catch');
+
+    for (let i = 0; i < 30; i++) state = tickTimer(state, 500);
+    expect(state.phase).toBe('playing');
+  });
+
+  it('fox practice: solo seeker catches AI, never seeker-wins immediately', () => {
+    let lobby = createLobby('fox-p', defaultConfig());
+    const joined = joinHuman(lobby, 'fox1', 'Fox');
+    expect(joined.ok).toBe(true);
+    if (!joined.ok) return;
+    let state = startPracticeMatch(joined.state, 7, 'fox');
+    expect(state.mode).toBe('practice');
+    expect(state.practiceRole).toBe('fox');
+    expect(state.seekerId).toBe('fox1');
+    expect(state.phase).toBe('playing');
+    expect(state.entities['fox1']!.role).toBe('seeker');
+    // Must NOT end as seekers (no human hiders)
+    for (let i = 0; i < 20; i++) state = tickTimer(state, 500);
+    expect(state.phase).toBe('playing');
+    expect(state.winner).toBeNull();
+
+    const ai = Object.values(state.entities).find((e) => e.kind === 'ai' && e.alive)!;
+    state = {
+      ...state,
+      entities: {
+        ...state.entities,
+        fox1: { ...state.entities['fox1']!, x: 100, y: 100 },
+        [ai.id]: { ...ai, x: 110, y: 100 },
+      },
+    };
+    const catchRes = attemptCatch(state, 'fox1', ai.id);
+    expect(catchRes.ok).toBe(true);
+    if (catchRes.ok) {
+      expect(catchRes.state.entities[ai.id]!.alive).toBe(false);
+      expect(catchRes.state.phase).toBe('playing');
+    }
   });
 });
 
@@ -139,7 +177,7 @@ describe('practice room rejoin after empty', () => {
     expect(again.state.phase).toBe('lobby');
     expect(again.state.humans).toContain('p2');
 
-    const practice2 = startPracticeMatch(again.state, 2);
+    const practice2 = startPracticeMatch(again.state, 2, 'rabbit');
     expect(practice2.phase).toBe('playing');
     expect(practice2.seekerId).toBeNull();
   });
@@ -149,7 +187,7 @@ describe('practice room rejoin after empty', () => {
     let res = joinHuman(lobby, 'ghost', 'G');
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    let state = startPracticeMatch(res.state, 9);
+    let state = startPracticeMatch(res.state, 9, 'rabbit');
     // Simulate corrupt empty playing state without leaveHuman
     state = { ...state, humans: [], entities: {} };
     expect(state.phase).toBe('playing');
@@ -167,7 +205,7 @@ describe('AI count = rabbit users × 5', () => {
     const joined = joinHuman(lobby, 'only', 'Solo');
     expect(joined.ok).toBe(true);
     if (!joined.ok) return;
-    let state = startPracticeMatch(joined.state, 1);
+    let state = startPracticeMatch(joined.state, 1, 'rabbit');
     expect(state.mode).toBe('practice');
     expect(state.seekerId).toBeNull();
     expect(state.phase).toBe('playing');

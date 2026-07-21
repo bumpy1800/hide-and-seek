@@ -11,6 +11,7 @@ import {
   type MatchConfig,
   type MatchMode,
   type MatchState,
+  type PracticeRole,
   type Winner,
 } from './types.js';
 import { createRng, pickRandom } from './rng.js';
@@ -34,6 +35,7 @@ export function createLobby(roomId: string, config: MatchConfig = defaultConfig(
     roomId,
     phase: 'lobby',
     mode: 'normal',
+    practiceRole: null,
     config,
     humans: [],
     seekerId: null,
@@ -75,6 +77,7 @@ export function returnToLobby(state: MatchState): MatchState {
     ...state,
     phase: 'lobby',
     mode: 'normal',
+    practiceRole: null,
     seekerId: null,
     entities,
     catchBudgetRemaining: state.config.catchBudget,
@@ -188,6 +191,7 @@ function spawnAiCrowd(
 
 export type StartOptions = {
   mode?: MatchMode;
+  practiceRole?: PracticeRole;
   seed?: number;
 };
 
@@ -212,7 +216,7 @@ export function startMatch(state: MatchState, seedOrOpts: number | StartOptions 
   }
 
   if (mode === 'practice') {
-    return startPracticeMatch(current, seed);
+    return startPracticeMatch(current, seed, opts.practiceRole ?? 'rabbit');
   }
 
   const rng = createRng(seed);
@@ -245,6 +249,7 @@ export function startMatch(state: MatchState, seedOrOpts: number | StartOptions 
     ...current,
     phase: 'playing',
     mode: 'normal',
+    practiceRole: null,
     seekerId,
     config: { ...current.config, aiCount: aiN },
     entities,
@@ -258,10 +263,15 @@ export function startMatch(state: MatchState, seedOrOpts: number | StartOptions 
 }
 
 /**
- * Practice: no seeker, all humans are hiders, AI crowd for blending rehearsal.
- * Hunt win/lose and catch budget do not apply.
+ * Practice modes (solo OK, never auto-ends via hunt win rules):
+ * - rabbit: no fox, move among AI rabbits
+ * - fox: local human is seeker, catch AI rabbits only (no human-hider win condition)
  */
-export function startPracticeMatch(state: MatchState, seed: number = Date.now()): MatchState {
+export function startPracticeMatch(
+  state: MatchState,
+  seed: number = Date.now(),
+  practiceRole: PracticeRole = 'rabbit',
+): MatchState {
   let current = state;
   if (current.phase === 'ended') {
     current = returnToLobby(current);
@@ -274,16 +284,25 @@ export function startPracticeMatch(state: MatchState, seed: number = Date.now())
   }
 
   const rng = createRng(seed);
-  // Solo practice allowed: all joined humans are rabbits (no seeker)
-  const rabbitUsers = current.humans.length;
+  const role: PracticeRole = practiceRole === 'fox' ? 'fox' : 'rabbit';
+
+  // AI = rabbit users × 5. Fox practice has 0 human rabbits → still spawn 5 (1 pack).
+  const rabbitUsers = role === 'fox' ? Math.max(1, current.humans.length) : current.humans.length;
   const aiN = aiCountForRabbitUsers(rabbitUsers);
   const entities: Record<string, EntityState> = { ...spawnAiCrowd(current.config, rng, aiN) };
 
+  let seekerId: string | null = null;
+  if (role === 'fox') {
+    // First human is the practicing fox (solo OK)
+    seekerId = current.humans[0]!;
+  }
+
   for (const id of current.humans) {
     const prev = current.entities[id]!;
+    const isSeeker = role === 'fox' && id === seekerId;
     entities[id] = {
       ...prev,
-      role: 'hider',
+      role: isSeeker ? 'seeker' : 'hider',
       alive: true,
       vx: 0,
       vy: 0,
@@ -292,16 +311,26 @@ export function startPracticeMatch(state: MatchState, seed: number = Date.now())
     };
   }
 
+  if (seekerId && entities[seekerId]) {
+    entities[seekerId] = {
+      ...entities[seekerId]!,
+      x: current.config.mapWidth * 0.15,
+      y: current.config.mapHeight * 0.5,
+    };
+  }
+
   return {
     ...current,
     phase: 'playing',
     mode: 'practice',
-    seekerId: null,
+    practiceRole: role,
+    seekerId,
     config: { ...current.config, aiCount: aiN },
     entities,
-    catchBudgetRemaining: current.config.catchBudget,
+    // Unlimited practice catch attempts for fox mode
+    catchBudgetRemaining: role === 'fox' ? 999 : current.config.catchBudget,
     timeRemainingMs: current.config.timeLimitMs,
-    seekerPrepRemainingMs: 0,
+    seekerPrepRemainingMs: 0, // no prep in practice
     winner: null,
     endReason: null,
     tick: 0,
@@ -310,9 +339,12 @@ export function startPracticeMatch(state: MatchState, seed: number = Date.now())
 
 /** Seeker cannot move or catch until prep elapses (normal mode only). */
 export function canSeekerAct(state: MatchState, playerId: string): boolean {
-  if (state.mode === 'practice') return false;
   if (state.phase !== 'playing') return false;
   if (state.seekerId !== playerId) return false;
+  // Practice fox: can hunt AI immediately (no prep)
+  if (state.mode === 'practice') {
+    return state.practiceRole === 'fox';
+  }
   return state.seekerPrepRemainingMs <= 0;
 }
 
@@ -337,11 +369,12 @@ export type CatchResult =
   | { ok: false; reason: string; state: MatchState };
 
 export function attemptCatch(state: MatchState, seekerId: string, targetId: string): CatchResult {
-  if (state.mode === 'practice') {
-    return { ok: false, reason: 'practice_no_catch', state };
-  }
   if (state.phase !== 'playing') {
     return { ok: false, reason: 'not_playing', state };
+  }
+  // Rabbit practice: no catching
+  if (state.mode === 'practice' && state.practiceRole !== 'fox') {
+    return { ok: false, reason: 'practice_no_catch', state };
   }
   if (!canSeekerAct(state, seekerId)) {
     return { ok: false, reason: 'seeker_prep', state };
@@ -349,7 +382,7 @@ export function attemptCatch(state: MatchState, seekerId: string, targetId: stri
   if (state.seekerId !== seekerId) {
     return { ok: false, reason: 'not_seeker', state };
   }
-  if (state.catchBudgetRemaining <= 0) {
+  if (state.mode !== 'practice' && state.catchBudgetRemaining <= 0) {
     return { ok: false, reason: 'catch_budget_exhausted', state };
   }
 
@@ -372,10 +405,33 @@ export function attemptCatch(state: MatchState, seekerId: string, targetId: stri
 
   const budget = state.catchBudgetRemaining - 1;
 
+  // Practice fox: AI rabbits ARE the catch targets (success)
   if (target.kind === 'ai') {
+    if (state.mode === 'practice' && state.practiceRole === 'fox') {
+      const entities = {
+        ...state.entities,
+        [targetId]: { ...target, alive: false, vx: 0, vy: 0 },
+      };
+      // Never end practice via hunt rules; optional respawn handled elsewhere
+      return {
+        ok: true,
+        state: {
+          ...state,
+          entities,
+          catchBudgetRemaining: Math.max(0, state.catchBudgetRemaining - 1),
+        },
+        caughtId: targetId,
+        kind: 'human', // treat as successful catch for UI
+      };
+    }
     let next: MatchState = { ...state, catchBudgetRemaining: budget };
     next = evaluateEndConditions(next);
     return { ok: false, reason: 'target_is_ai', state: next };
+  }
+
+  // Practice has no human targets to eliminate for win
+  if (state.mode === 'practice') {
+    return { ok: false, reason: 'practice_ai_only', state };
   }
 
   const entities = {
@@ -405,7 +461,22 @@ export function tickTimer(state: MatchState, dtMs: number): MatchState {
     if (state.humans.length === 0) {
       return createLobby(state.roomId, state.config);
     }
-    return { ...state, tick: state.tick + 1 };
+    let next = { ...state, tick: state.tick + 1 };
+    // Fox practice: if all AI rabbits are down, spawn a fresh pack
+    if (next.practiceRole === 'fox') {
+      const aliveAi = Object.values(next.entities).filter((e) => e.kind === 'ai' && e.alive);
+      if (aliveAi.length === 0) {
+        const rng = createRng(next.tick + 99);
+        const fresh = spawnAiCrowd(next.config, rng, next.config.aiCount);
+        const entities = { ...next.entities };
+        for (const [id, e] of Object.entries(next.entities)) {
+          if (e.kind === 'ai') delete entities[id];
+        }
+        Object.assign(entities, fresh);
+        next = { ...next, entities };
+      }
+    }
+    return next;
   }
 
   const timeRemainingMs = Math.max(0, state.timeRemainingMs - dtMs);
