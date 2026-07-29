@@ -3,18 +3,44 @@ import {
   DEFAULT_AI_COUNT,
   DEFAULT_CATCH_BUDGET,
   DEFAULT_TIME_LIMIT_MS,
+  FOX_ROULETTE_MS,
   MAP_HEIGHT,
   MAP_WIDTH,
   MAX_HUMAN_PLAYERS,
+  POST_REVEAL_COUNTDOWN_MS,
   SEEKER_PREP_MS,
+  START_SEQUENCE_MS,
   type EntityState,
   type MatchConfig,
   type MatchMode,
   type MatchState,
   type PracticeRole,
+  type RoomSettings,
   type Winner,
 } from './types.js';
 import { createRng, pickRandom } from './rng.js';
+import {
+  DEFAULT_MEADOW_SEED,
+  ENTITY_COLLIDE_RADIUS,
+  getSolidObstacles,
+  meadowSeedFromMatchSeed,
+  newRoomMeadowSeed,
+  resolveSolidCollisions,
+  type SolidObstacle,
+} from './meadowLayout.js';
+
+/** Cache solids per meadow seed (integrateMotion is hot). */
+const solidsBySeed = new Map<number, SolidObstacle[]>();
+
+export function solidsForMeadowSeed(seed: number = DEFAULT_MEADOW_SEED): SolidObstacle[] {
+  const key = seed >>> 0;
+  let solids = solidsBySeed.get(key);
+  if (!solids) {
+    solids = getSolidObstacles(key);
+    solidsBySeed.set(key, solids);
+  }
+  return solids;
+}
 
 export function defaultConfig(overrides: Partial<MatchConfig> = {}): MatchConfig {
   return {
@@ -26,11 +52,24 @@ export function defaultConfig(overrides: Partial<MatchConfig> = {}): MatchConfig
     mapHeight: MAP_HEIGHT,
     catchRange: CATCH_RANGE,
     seekerPrepMs: SEEKER_PREP_MS,
+    foxMode: 'roulette',
     ...overrides,
   };
 }
 
-export function createLobby(roomId: string, config: MatchConfig = defaultConfig()): MatchState {
+/**
+ * Create a new room lobby. Meadow layout seed is fixed for this room lifetime
+ * (rematches keep the same trees/rocks). Pass `meadowSeed` only for tests.
+ */
+export function createLobby(
+  roomId: string,
+  config: MatchConfig = defaultConfig(),
+  meadowSeed?: number,
+): MatchState {
+  const seed =
+    meadowSeed != null && Number.isFinite(meadowSeed)
+      ? meadowSeed >>> 0
+      : newRoomMeadowSeed(roomId);
   return {
     roomId,
     phase: 'lobby',
@@ -43,10 +82,87 @@ export function createLobby(roomId: string, config: MatchConfig = defaultConfig(
     catchBudgetRemaining: config.catchBudget,
     timeRemainingMs: config.timeLimitMs,
     seekerPrepRemainingMs: 0,
+    startSequenceRemainingMs: 0,
     winner: null,
     endReason: null,
     tick: 0,
+    caughtHumans: [],
+    meadowSeed: seed,
   };
+}
+
+/** Number of human rabbits (hiders) for a lobby about to start with a given seeker. */
+export function humanHiderCount(humans: readonly string[], seekerId: string): number {
+  return humans.filter((id) => id !== seekerId).length;
+}
+
+/**
+ * @deprecated Prefer host-configured config.catchBudget (total catches including AI).
+ * Kept for tests that still reference the name — now returns host total N, not hider count.
+ */
+export function catchBudgetForHumanHiders(hiderCount: number): number {
+  return Math.max(0, hiderCount);
+}
+
+/** Clamp host room options to safe ranges. */
+export function normalizeRoomSettings(raw: Partial<RoomSettings>): RoomSettings {
+  const catchBudget = Math.min(30, Math.max(1, Math.floor(raw.catchBudget ?? DEFAULT_CATCH_BUDGET)));
+  const timeLimitMs = Math.min(600_000, Math.max(30_000, Math.floor(raw.timeLimitMs ?? DEFAULT_TIME_LIMIT_MS)));
+  const aiCount = Math.min(40, Math.max(0, Math.floor(raw.aiCount ?? DEFAULT_AI_COUNT)));
+  const foxMode = raw.foxMode === 'designate' ? 'designate' : 'roulette';
+  return { catchBudget, timeLimitMs, aiCount, foxMode };
+}
+
+/** Apply host room settings onto lobby config. */
+export function applyRoomSettings(state: MatchState, raw: Partial<RoomSettings>): MatchState {
+  const s = normalizeRoomSettings(raw);
+  return {
+    ...state,
+    config: {
+      ...state.config,
+      catchBudget: s.catchBudget,
+      timeLimitMs: s.timeLimitMs,
+      aiCount: s.aiCount,
+      foxMode: s.foxMode,
+    },
+    catchBudgetRemaining: s.catchBudget,
+    timeRemainingMs: s.timeLimitMs,
+  };
+}
+
+/**
+ * Which part of the start sequence (roulette vs countdown) given remaining ms.
+ * Pure helper for UI + tests (no Phaser).
+ */
+export function startSequenceStage(
+  remainingMs: number,
+): 'roulette' | 'countdown' | 'done' {
+  if (remainingMs <= 0) return 'done';
+  const elapsed = START_SEQUENCE_MS - remainingMs;
+  if (elapsed < FOX_ROULETTE_MS) return 'roulette';
+  return 'countdown';
+}
+
+/** Seconds to show on the post-reveal countdown (1..3). */
+export function startCountdownSeconds(remainingMs: number): number {
+  if (remainingMs <= 0) return 0;
+  const stage = startSequenceStage(remainingMs);
+  if (stage !== 'countdown') return Math.ceil(POST_REVEAL_COUNTDOWN_MS / 1000);
+  return Math.max(1, Math.ceil(remainingMs / 1000));
+}
+
+/** Human users caught count (score among total N catch attempts). */
+export function humanCatchScore(state: MatchState): number {
+  return listCaughtHumans(state).length;
+}
+
+/** Safe accessor for caught human list (older snapshots may omit the field). */
+export function listCaughtHumans(
+  state: MatchState,
+): Array<{ id: string; name: string }> {
+  const list = state.caughtHumans;
+  if (!Array.isArray(list)) return [];
+  return list.map((c) => ({ id: c.id, name: c.name }));
 }
 
 export type JoinResult =
@@ -54,7 +170,7 @@ export type JoinResult =
   | { ok: false; reason: string; state: MatchState };
 
 export function canJoin(state: MatchState): boolean {
-  if (state.phase === 'playing') return false;
+  if (state.phase === 'playing' || state.phase === 'starting') return false;
   if (state.phase === 'ended') return state.humans.length < state.config.maxHumans;
   return state.humans.length < state.config.maxHumans;
 }
@@ -83,9 +199,12 @@ export function returnToLobby(state: MatchState): MatchState {
     catchBudgetRemaining: state.config.catchBudget,
     timeRemainingMs: state.config.timeLimitMs,
     seekerPrepRemainingMs: 0,
+    startSequenceRemainingMs: 0,
     winner: null,
     endReason: null,
     tick: 0,
+    caughtHumans: [],
+    meadowSeed: state.meadowSeed ?? DEFAULT_MEADOW_SEED,
   };
 }
 
@@ -193,10 +312,14 @@ export type StartOptions = {
   mode?: MatchMode;
   practiceRole?: PracticeRole;
   seed?: number;
+  /** Host-picked fox when foxMode is designate (must be in state.humans). */
+  designatedSeekerId?: string;
+  /** Override config.foxMode for this start. */
+  foxMode?: import('./types.js').FoxAssignmentMode;
 };
 
 /**
- * Start a normal hunt (random seeker + prep) or practice (no seeker).
+ * Start a normal hunt (random or designated seeker + prep) or practice (no seeker).
  */
 export function startMatch(state: MatchState, seedOrOpts: number | StartOptions = Date.now()): MatchState {
   const opts: StartOptions =
@@ -224,10 +347,28 @@ export function startMatch(state: MatchState, seedOrOpts: number | StartOptions 
     throw new Error('startMatch: normal mode needs at least 2 human players');
   }
 
+  const foxMode =
+    opts.foxMode === 'designate' || opts.foxMode === 'roulette'
+      ? opts.foxMode
+      : current.config.foxMode === 'designate'
+        ? 'designate'
+        : 'roulette';
+
   const rng = createRng(seed);
-  const seekerId = pickRandom(current.humans, rng);
-  const rabbitUsers = Math.max(0, current.humans.length - 1);
-  const aiN = aiCountForRabbitUsers(rabbitUsers);
+  let seekerId: string;
+  if (foxMode === 'designate') {
+    const pick = opts.designatedSeekerId;
+    if (!pick || !current.humans.includes(pick)) {
+      throw new Error('startMatch: designated seeker must be a human in the room');
+    }
+    seekerId = pick;
+  } else {
+    seekerId = pickRandom(current.humans, rng);
+  }
+
+  // Host-configured totals (not derived from human hider count)
+  const aiN = Math.max(0, current.config.aiCount);
+  const catchBudget = Math.max(1, current.config.catchBudget);
   const entities: Record<string, EntityState> = { ...spawnAiCrowd(current.config, rng, aiN) };
 
   for (const id of current.humans) {
@@ -250,20 +391,36 @@ export function startMatch(state: MatchState, seedOrOpts: number | StartOptions 
     y: current.config.mapHeight * 0.5,
   };
 
+  // Roulette: full spin + 3s; designate: fox already known → countdown only
+  const startSequenceRemainingMs =
+    foxMode === 'roulette' ? START_SEQUENCE_MS : POST_REVEAL_COUNTDOWN_MS;
+
+  // Layout is room-scoped: keep createLobby meadowSeed across rematches
+  const meadowSeed = current.meadowSeed ?? DEFAULT_MEADOW_SEED;
+
   return {
     ...current,
-    phase: 'playing',
+    phase: 'starting',
     mode: 'normal',
     practiceRole: null,
     seekerId,
-    config: { ...current.config, aiCount: aiN },
+    config: {
+      ...current.config,
+      aiCount: aiN,
+      catchBudget,
+      timeLimitMs: current.config.timeLimitMs,
+      foxMode,
+    },
     entities,
-    catchBudgetRemaining: current.config.catchBudget,
+    catchBudgetRemaining: catchBudget,
     timeRemainingMs: current.config.timeLimitMs,
-    seekerPrepRemainingMs: current.config.seekerPrepMs,
+    seekerPrepRemainingMs: 0, // prep starts when playing begins
+    startSequenceRemainingMs,
     winner: null,
     endReason: null,
     tick: 0,
+    caughtHumans: [],
+    meadowSeed,
   };
 }
 
@@ -324,6 +481,9 @@ export function startPracticeMatch(
     };
   }
 
+  // Practice also keeps the room lobby layout (not re-rolled each start)
+  const meadowSeed = current.meadowSeed ?? DEFAULT_MEADOW_SEED;
+
   return {
     ...current,
     phase: 'playing',
@@ -336,10 +496,22 @@ export function startPracticeMatch(
     catchBudgetRemaining: role === 'fox' ? 999 : current.config.catchBudget,
     timeRemainingMs: current.config.timeLimitMs,
     seekerPrepRemainingMs: 0, // no prep in practice
+    startSequenceRemainingMs: 0,
     winner: null,
+    meadowSeed,
     endReason: null,
     tick: 0,
+    caughtHumans: [],
   };
+}
+
+/**
+ * Normalized prep remaining. Non-finite / missing → 0 (never permanent blind).
+ */
+export function seekerPrepRemainingMs(state: MatchState): number {
+  const v = state.seekerPrepRemainingMs as unknown;
+  if (typeof v !== 'number' || !Number.isFinite(v)) return 0;
+  return Math.max(0, v);
 }
 
 /** Seeker cannot move or catch until prep elapses (normal mode only). */
@@ -350,7 +522,7 @@ export function canSeekerAct(state: MatchState, playerId: string): boolean {
   if (state.mode === 'practice') {
     return state.practiceRole === 'fox';
   }
-  return state.seekerPrepRemainingMs <= 0;
+  return seekerPrepRemainingMs(state) <= 0;
 }
 
 /** Seeker vision of rabbit motion is blocked during prep. */
@@ -358,20 +530,146 @@ export function canSeekerSee(state: MatchState, playerId: string): boolean {
   if (state.mode === 'practice') return true;
   if (state.phase !== 'playing') return true;
   if (state.seekerId !== playerId) return true;
-  return state.seekerPrepRemainingMs <= 0;
+  return seekerPrepRemainingMs(state) <= 0;
 }
 
 export function isSeekerPrepActive(state: MatchState): boolean {
   return (
     state.mode === 'normal' &&
     state.phase === 'playing' &&
-    state.seekerPrepRemainingMs > 0
+    seekerPrepRemainingMs(state) > 0
   );
 }
 
+/**
+ * Wall-clock remaining for client failsafe.
+ * @param prepEndsAtMs absolute timestamp when prep should end, or null to use state only
+ */
+export function effectivePrepRemainingMs(
+  state: MatchState,
+  nowMs: number,
+  prepEndsAtMs: number | null,
+): number {
+  if (state.mode !== 'normal' || state.phase !== 'playing') return 0;
+  if (prepEndsAtMs != null && Number.isFinite(prepEndsAtMs)) {
+    return Math.max(0, prepEndsAtMs - nowMs);
+  }
+  return seekerPrepRemainingMs(state);
+}
+
+export function isSeekerBlind(
+  state: MatchState,
+  playerId: string,
+  nowMs: number = Date.now(),
+  prepEndsAtMs: number | null = null,
+): boolean {
+  if (state.seekerId !== playerId) return false;
+  if (state.mode === 'practice') return false;
+  if (state.phase !== 'playing') return false;
+  return effectivePrepRemainingMs(state, nowMs, prepEndsAtMs) > 0;
+}
+
+export type CatchVictimKind = 'human' | 'ai';
+
 export type CatchResult =
-  | { ok: true; state: MatchState; caughtId: string; kind: 'human' }
+  | {
+      ok: true;
+      state: MatchState;
+      caughtId: string;
+      kind: CatchVictimKind;
+      name: string;
+      x: number;
+      y: number;
+      /** True when a lasting grave marker should be shown (human only). */
+      placeGrave: boolean;
+    }
   | { ok: false; reason: string; state: MatchState };
+
+/**
+ * Role-specific objective lines for HUD (normal play + practice).
+ * Pure helper so fox/rabbit clients always get different copy.
+ */
+export function roleObjectiveLines(state: MatchState, you: string): string[] {
+  if (state.mode === 'practice') {
+    if (state.practiceRole === 'fox') {
+      return [
+        '목표  AI 토끼를 가까이서 잡기',
+        '안내  시간 제한 없음 · 연습용',
+      ];
+    }
+    return [
+      '목표  맵을 돌아다니며 이동 연습',
+      '안내  여우 없음 · 자유롭게 이동',
+    ];
+  }
+  if (state.phase === 'lobby') {
+    return ['목표  인원을 모은 뒤 시작'];
+  }
+  if (state.phase === 'starting') {
+    const stage = startSequenceStage(state.startSequenceRemainingMs ?? 0);
+    if (stage === 'roulette') {
+      return ['안내  여우 추첨 중…'];
+    }
+    return [
+      `안내  ${startCountdownSeconds(state.startSequenceRemainingMs ?? 0)}초 후 시작`,
+    ];
+  }
+  if (state.phase === 'ended') {
+    const users = humanCatchScore(state);
+    const total = state.config.catchBudget;
+    return [
+      '목표  결과 확인 후 다시하기',
+      `유저 포획  ${users}명 / 전체 시도 ${total - state.catchBudgetRemaining}회`,
+    ];
+  }
+  const isFox = state.seekerId === you;
+  if (isFox) {
+    if (isSeekerPrepActive(state)) {
+      return [
+        '목표  준비 시간 — 시야·이동 잠금',
+        `준비  ${Math.ceil(seekerPrepRemainingMs(state) / 1000)}초 후 사냥 시작`,
+      ];
+    }
+    return [
+      '목표  제한 시간 안에 토끼를 잡으세요',
+      `잡기 횟수  ${state.catchBudgetRemaining}/${state.config.catchBudget} (AI·유저 공통)`,
+      `유저 포획  ${humanCatchScore(state)}명`,
+    ];
+  }
+  // Rabbit (human hider)
+  if (isSeekerPrepActive(state)) {
+    return [
+      '목표  술래 준비 중 — 자리를 섞어 숨으세요',
+      `준비  ${Math.ceil(seekerPrepRemainingMs(state) / 1000)}초`,
+    ];
+  }
+  return [
+    '목표  여우에게 잡히지 말고 끝까지 버티기',
+    '안내  나무·바위 뒤로 숨고 거리를 유지하세요',
+  ];
+}
+
+/** Test/helper: jump past roulette+countdown+prep into actionable hunt. */
+export function skipToPlaying(state: MatchState): MatchState {
+  return {
+    ...state,
+    phase: 'playing',
+    startSequenceRemainingMs: 0,
+    seekerPrepRemainingMs: 0,
+  };
+}
+
+/** Short global toast line for a successful catch (all clients). */
+export function catchAnnounceText(detail: {
+  kind: CatchVictimKind;
+  name?: string;
+}): string {
+  if (detail.kind === 'ai') {
+    return '잡았다! AI 토끼';
+  }
+  const nick = (detail.name ?? '').trim() || '유저';
+  return `잡았다! 유저 토끼 「${nick}」`;
+}
 
 export function attemptCatch(state: MatchState, seekerId: string, targetId: string): CatchResult {
   if (state.phase !== 'playing') {
@@ -387,7 +685,8 @@ export function attemptCatch(state: MatchState, seekerId: string, targetId: stri
   if (state.seekerId !== seekerId) {
     return { ok: false, reason: 'not_seeker', state };
   }
-  if (state.mode !== 'practice' && state.catchBudgetRemaining <= 0) {
+  // Total catch budget (AI + human) — no catches when exhausted in normal mode
+  if (state.mode === 'normal' && state.catchBudgetRemaining <= 0) {
     return { ok: false, reason: 'catch_budget_exhausted', state };
   }
 
@@ -408,30 +707,34 @@ export function attemptCatch(state: MatchState, seekerId: string, targetId: stri
     return { ok: false, reason: 'out_of_range', state };
   }
 
-  const budget = state.catchBudgetRemaining - 1;
+  const catchX = target.x;
+  const catchY = target.y;
 
-  // Practice fox: AI rabbits ARE the catch targets (success)
+  // AI rabbit: spends 1 of total N catch attempts; no grave; not scored as user catch
   if (target.kind === 'ai') {
-    if (state.mode === 'practice' && state.practiceRole === 'fox') {
-      const entities = {
-        ...state.entities,
-        [targetId]: { ...target, alive: false, vx: 0, vy: 0 },
-      };
-      // Never end practice via hunt rules; optional respawn handled elsewhere
-      return {
-        ok: true,
-        state: {
-          ...state,
-          entities,
-          catchBudgetRemaining: Math.max(0, state.catchBudgetRemaining - 1),
-        },
-        caughtId: targetId,
-        kind: 'human', // treat as successful catch for UI
-      };
+    const entities = {
+      ...state.entities,
+      [targetId]: { ...target, alive: false, vx: 0, vy: 0 },
+    };
+    const budget = Math.max(0, state.catchBudgetRemaining - 1);
+    let next: MatchState = {
+      ...state,
+      entities,
+      catchBudgetRemaining: budget,
+    };
+    if (state.mode === 'normal') {
+      next = evaluateEndConditions(next);
     }
-    let next: MatchState = { ...state, catchBudgetRemaining: budget };
-    next = evaluateEndConditions(next);
-    return { ok: false, reason: 'target_is_ai', state: next };
+    return {
+      ok: true,
+      state: next,
+      caughtId: targetId,
+      kind: 'ai',
+      name: target.name || 'AI',
+      x: catchX,
+      y: catchY,
+      placeGrave: false,
+    };
   }
 
   // Practice has no human targets to eliminate for win
@@ -439,24 +742,64 @@ export function attemptCatch(state: MatchState, seekerId: string, targetId: stri
     return { ok: false, reason: 'practice_ai_only', state };
   }
 
+  // Successful human catch spends 1 budget and records the victim (user score)
+  const budget = state.catchBudgetRemaining - 1;
+  const victimName = target.name || targetId;
   const entities = {
     ...state.entities,
     [targetId]: { ...target, alive: false, vx: 0, vy: 0 },
   };
-  let next: MatchState = { ...state, entities, catchBudgetRemaining: budget };
+  const caughtHumans = [
+    ...listCaughtHumans(state),
+    { id: targetId, name: victimName },
+  ];
+  let next: MatchState = {
+    ...state,
+    entities,
+    catchBudgetRemaining: budget,
+    caughtHumans,
+  };
   next = evaluateEndConditions(next);
-  return { ok: true, state: next, caughtId: targetId, kind: 'human' };
+  return {
+    ok: true,
+    state: next,
+    caughtId: targetId,
+    kind: 'human',
+    name: victimName,
+    x: catchX,
+    y: catchY,
+    placeGrave: true,
+  };
 }
 
 export function tickTimer(state: MatchState, dtMs: number): MatchState {
+  // Fox roulette + countdown gate before hunt
+  if (state.phase === 'starting' && state.mode === 'normal') {
+    const left = Math.max(0, (state.startSequenceRemainingMs ?? 0) - dtMs);
+    if (left <= 0) {
+      return {
+        ...state,
+        phase: 'playing',
+        startSequenceRemainingMs: 0,
+        seekerPrepRemainingMs: state.config.seekerPrepMs,
+        tick: state.tick + 1,
+      };
+    }
+    return {
+      ...state,
+      startSequenceRemainingMs: left,
+      tick: state.tick + 1,
+    };
+  }
+
   if (state.phase !== 'playing') return state;
 
   // Prep countdown: AI may still move; main hunt timer waits until prep ends.
-  if (state.mode === 'normal' && state.seekerPrepRemainingMs > 0) {
-    const seekerPrepRemainingMs = Math.max(0, state.seekerPrepRemainingMs - dtMs);
+  const prepLeft = seekerPrepRemainingMs(state);
+  if (state.mode === 'normal' && prepLeft > 0) {
     return {
       ...state,
-      seekerPrepRemainingMs,
+      seekerPrepRemainingMs: Math.max(0, prepLeft - dtMs),
       tick: state.tick + 1,
     };
   }
@@ -510,8 +853,11 @@ export function setEntityVelocity(
 }
 
 export function integrateMotion(state: MatchState, dtSec: number): MatchState {
+  // starting (roulette/countdown): freeze everyone; only playing moves
   if (state.phase !== 'playing') return state;
   const entities: Record<string, EntityState> = {};
+  const mapW = state.config.mapWidth;
+  const mapH = state.config.mapHeight;
   for (const [id, e] of Object.entries(state.entities)) {
     if (!e.alive) {
       entities[id] = e;
@@ -522,8 +868,13 @@ export function integrateMotion(state: MatchState, dtSec: number): MatchState {
       entities[id] = { ...e, vx: 0, vy: 0 };
       continue;
     }
-    const x = clamp(e.x + e.vx * dtSec, 16, state.config.mapWidth - 16);
-    const y = clamp(e.y + e.vy * dtSec, 16, state.config.mapHeight - 16);
+    let x = e.x + e.vx * dtSec;
+    let y = e.y + e.vy * dtSec;
+    // Solid props (tree / rock) for this match's meadowSeed — bushes stay walkable cover
+    const solids = solidsForMeadowSeed(state.meadowSeed ?? DEFAULT_MEADOW_SEED);
+    const hit = resolveSolidCollisions(x, y, ENTITY_COLLIDE_RADIUS, solids);
+    x = clamp(hit.x, 16, mapW - 16);
+    y = clamp(hit.y, 16, mapH - 16);
     entities[id] = { ...e, x, y };
   }
   return { ...state, entities };

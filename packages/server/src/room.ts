@@ -99,10 +99,18 @@ export class Room {
         return;
       }
       try {
+        const foxMode = this.state.config.foxMode === 'designate' ? 'designate' : 'roulette';
+        let designatedSeekerId =
+          typeof intent.designatedSeekerId === 'string' ? intent.designatedSeekerId : undefined;
+        if (mode === 'normal' && foxMode === 'designate' && !designatedSeekerId) {
+          designatedSeekerId = this.state.humans[0];
+        }
         this.state = startMatch(this.state, {
           mode,
           practiceRole,
           seed: Date.now() ^ this.state.humans.length,
+          foxMode: mode === 'normal' ? foxMode : undefined,
+          designatedSeekerId: mode === 'normal' ? designatedSeekerId : undefined,
         });
       } catch (e) {
         this.send(playerId, {
@@ -113,6 +121,10 @@ export class Room {
       }
       this.endedBroadcast = false;
       this.broadcastSnapshot();
+      const names = this.state.humans.map((id) => ({
+        id,
+        name: this.names.get(id) || this.state.entities[id]?.name || id,
+      }));
       this.broadcast({
         type: 'event',
         event: 'match_started',
@@ -120,6 +132,13 @@ export class Room {
           seekerId: this.state.seekerId,
           mode: this.state.mode,
           practiceRole: this.state.practiceRole,
+          prepMs: this.state.config.seekerPrepMs,
+          startSequenceMs: this.state.startSequenceRemainingMs,
+          humans: names,
+          catchBudget: this.state.config.catchBudget,
+          timeLimitMs: this.state.config.timeLimitMs,
+          aiCount: this.state.config.aiCount,
+          foxMode: this.state.config.foxMode,
         },
       });
       return;
@@ -157,7 +176,17 @@ export class Room {
       this.broadcast({
         type: 'event',
         event: result.ok ? 'catch_success' : 'catch_fail',
-        detail: result,
+        detail: result.ok
+          ? {
+              ok: true,
+              kind: result.kind,
+              name: result.name,
+              x: result.x,
+              y: result.y,
+              caughtId: result.caughtId,
+              placeGrave: result.placeGrave,
+            }
+          : result,
       });
       this.broadcastSnapshot();
       if (this.state.phase === 'ended') {
@@ -167,9 +196,11 @@ export class Room {
   }
 
   tick(dtMs: number): void {
-    if (this.state.phase !== 'playing') return;
-    this.state = stepAiCrowd(this.state, dtMs, this.state.tick + 1);
-    this.state = integrateMotion(this.state, dtMs / 1000);
+    if (this.state.phase !== 'playing' && this.state.phase !== 'starting') return;
+    if (this.state.phase === 'playing') {
+      this.state = stepAiCrowd(this.state, dtMs, this.state.tick + 1);
+      this.state = integrateMotion(this.state, dtMs / 1000);
+    }
     this.state = tickTimer(this.state, dtMs);
     this.broadcastSnapshot();
     if (this.state.phase === 'ended' && !this.endedBroadcast) {

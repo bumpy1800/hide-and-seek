@@ -3,6 +3,9 @@ import { VIEWPORT_HEIGHT, VIEWPORT_WIDTH } from '@hide-and-seek/shared';
 import { BootScene } from './scenes/BootScene';
 import { MenuScene } from './scenes/MenuScene';
 import { GameScene } from './scenes/GameScene';
+import { isEphemeralWsUrl, preferPeerMultiplayer as preferPeerFromEnv } from './net/multiplayerMode';
+
+export { isEphemeralWsUrl, preferPeerFromEnv as preferPeerMultiplayerLogic };
 
 /** Cap DPR so canvas stays sharp on retina without extreme GPU cost. */
 function gameResolution(): number {
@@ -22,10 +25,11 @@ export function createGameConfig(parent: string | HTMLElement): Phaser.Types.Cor
     backgroundColor: '#5d8a3e',
     resolution,
     render: {
-      antialias: true,
-      antialiasGL: true,
+      // Dot graphics: crisp nearest sampling, no soft AA on sprites
+      antialias: false,
+      antialiasGL: false,
       roundPixels: true,
-      pixelArt: false,
+      pixelArt: true,
       powerPreference: 'high-performance' as const,
       transparent: false,
     },
@@ -52,10 +56,19 @@ export function createGameConfig(parent: string | HTMLElement): Phaser.Types.Cor
 
 export function getWsUrl(): string {
   const fromEnv = import.meta.env.VITE_WS_URL as string | undefined;
-  if (fromEnv && fromEnv.length > 0) return fromEnv;
+  // Never return known-dead ephemeral tunnels as the multiplayer endpoint
+  if (fromEnv && fromEnv.length > 0 && !isEphemeralWsUrl(fromEnv)) return fromEnv;
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   if (location.port === '5173' || location.port === '4173') {
     return 'ws://localhost:8787';
   }
   return `${proto}//${location.host}`;
+}
+
+/** Runtime: read Vite env and choose Peer vs WS multiplayer. */
+export function preferPeerMultiplayer(): boolean {
+  return preferPeerFromEnv({
+    VITE_PEER_MULTIPLAYER: import.meta.env.VITE_PEER_MULTIPLAYER as string | undefined,
+    VITE_WS_URL: import.meta.env.VITE_WS_URL as string | undefined,
+  });
 }

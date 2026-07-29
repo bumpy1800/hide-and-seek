@@ -8,6 +8,7 @@ import {
   joinHuman,
   setEntityVelocity,
   startMatch,
+  skipToPlaying,
 } from '../src/index.js';
 
 describe('expanded meadow map bounds', () => {
@@ -46,10 +47,11 @@ describe('expanded meadow map bounds', () => {
     joined = joinHuman(joined.state, 'p2', 'Q');
     expect(joined.ok).toBe(true);
     if (!joined.ok) return;
-    // 2 humans → 1 seeker + 1 rabbit → 5 AI
+    // Host-configured AI count (default DEFAULT_AI_COUNT)
     state = startMatch(joined.state, 42);
     const ais = Object.values(state.entities).filter((e) => e.kind === 'ai');
-    expect(ais.length).toBe(5);
+    expect(ais.length).toBe(state.config.aiCount);
+    expect(ais.length).toBeGreaterThan(0);
     for (const a of ais) {
       expect(a.x).toBeGreaterThanOrEqual(0);
       expect(a.x).toBeLessThanOrEqual(MAP_WIDTH);

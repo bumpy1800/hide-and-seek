@@ -7,6 +7,7 @@ import {
   stepAiCrowd,
   hasAiBrain,
   resetAiBrains,
+  skipToPlaying,
 } from '../src/index.js';
 
 describe('room-scoped AI brains', () => {
@@ -23,21 +24,22 @@ describe('room-scoped AI brains', () => {
     rb = joinHuman(rb.ok ? rb.state : b, 'hb2', 'HB2');
     expect(ra.ok && rb.ok).toBe(true);
     if (!ra.ok || !rb.ok) return;
-    // 2 humans each → 5 AI (ai-0 exists)
-    a = startMatch(ra.state, 1);
-    b = startMatch(rb.state, 1);
+    a = skipToPlaying(startMatch(ra.state, 1));
+    b = skipToPlaying(startMatch(rb.state, 1));
+    const aiA = Object.keys(a.entities).find((id) => a.entities[id]!.kind === 'ai')!;
+    const aiB = Object.keys(b.entities).find((id) => b.entities[id]!.kind === 'ai')!;
 
     a = stepAiCrowd(a, 50, 1);
     b = stepAiCrowd(b, 50, 1);
 
-    expect(hasAiBrain('room-a', 'ai-0')).toBe(true);
-    expect(hasAiBrain('room-b', 'ai-0')).toBe(true);
+    expect(hasAiBrain('room-a', aiA)).toBe(true);
+    expect(hasAiBrain('room-b', aiB)).toBe(true);
 
     resetAiBrains('room-a');
-    expect(hasAiBrain('room-a', 'ai-0')).toBe(false);
-    expect(hasAiBrain('room-b', 'ai-0')).toBe(true);
+    expect(hasAiBrain('room-a', aiA)).toBe(false);
+    expect(hasAiBrain('room-b', aiB)).toBe(true);
 
     resetAiBrains('room-b');
-    expect(hasAiBrain('room-b', 'ai-0')).toBe(false);
+    expect(hasAiBrain('room-b', aiB)).toBe(false);
   });
 });

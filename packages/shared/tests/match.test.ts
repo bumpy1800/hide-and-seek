@@ -61,7 +61,7 @@ describe('timer and catch budget', () => {
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     state = startMatch(res.state, 1);
-    state = { ...state, seekerPrepRemainingMs: 0 };
+    state = { ...state, seekerPrepRemainingMs: 0, phase: 'playing', startSequenceRemainingMs: 0 };
     state = tickTimer(state, 1000);
     expect(state.phase).toBe('ended');
     expect(state.winner).toBe('hiders');
@@ -101,57 +101,78 @@ describe('timer and catch budget', () => {
       },
     };
 
-    // Catch AI → budget 1, not ok
+    // Ensure playable
+    state = {
+      ...state,
+      phase: 'playing',
+      startSequenceRemainingMs: 0,
+      seekerPrepRemainingMs: 0,
+      catchBudgetRemaining: 2,
+    };
+    // Catch AI → ok, spends 1 total budget, no grave
     let catchRes = attemptCatch(state, seekerId, aiId);
-    expect(catchRes.ok).toBe(false);
-    if (catchRes.ok) return;
-    expect(catchRes.reason).toBe('target_is_ai');
+    expect(catchRes.ok).toBe(true);
+    if (!catchRes.ok) return;
+    expect(catchRes.kind).toBe('ai');
+    expect(catchRes.placeGrave).toBe(false);
     state = catchRes.state;
     expect(state.catchBudgetRemaining).toBe(1);
-    expect(state.entities[aiId]?.alive).toBe(true);
+    expect(state.entities[aiId]?.alive).toBe(false);
 
-    // Catch human → success, budget 0 → may end if no hiders or budget exhausted
+    // Catch human → success, budget decrements again, grave
     catchRes = attemptCatch(state, seekerId, hiderId);
-    // If only one hider and caught, seekers win
+    expect(catchRes.ok).toBe(true);
     if (catchRes.ok) {
       expect(catchRes.kind).toBe('human');
+      expect(catchRes.placeGrave).toBe(true);
+      expect(catchRes.name).toBeTruthy();
       state = catchRes.state;
       expect(state.entities[hiderId]?.alive).toBe(false);
+      expect(state.catchBudgetRemaining).toBe(0);
     }
 
-    // Exhaust budget with no targets left path: start fresh budget 1 waste on AI
-    lobby = createLobby('r2', defaultConfig({ seekerPrepMs: 0, catchBudget: 1, aiCount: 1, catchRange: 1000 }));
+    // Exhaust remaining budget with a living hider still on the field
+    lobby = createLobby('r2', defaultConfig({ seekerPrepMs: 0, aiCount: 0, catchRange: 1000 }));
     res = joinHuman(lobby, 'seek', 'S', { x: 100, y: 100 });
-    res = joinHuman(res.ok ? res.state : lobby, 'hide', 'H', { x: 200, y: 200 });
+    res = joinHuman(res.ok ? res.state : lobby, 'hide', 'H', { x: 110, y: 100 });
+    res = joinHuman(res.ok ? res.state : lobby, 'hide2', 'H2', { x: 900, y: 900 });
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     state = startMatch(res.state, 3);
+    // defaultConfig catchBudget is DEFAULT_CATCH_BUDGET (3) unless overridden
+    expect(state.catchBudgetRemaining).toBe(state.config.catchBudget);
     const sid = state.seekerId!;
-    const aid = Object.values(state.entities).find((e) => e.kind === 'ai')!.id;
+    // Place seeker next to one hider, leave the other far and alive; budget 1
+    const hiders = state.humans.filter((h) => h !== sid);
     state = {
       ...state,
+      seekerPrepRemainingMs: 0,
+      phase: 'playing' as const,
+      startSequenceRemainingMs: 0,
+      catchBudgetRemaining: 1,
       entities: {
         ...state.entities,
         [sid]: { ...state.entities[sid]!, x: 100, y: 100 },
-        [aid]: { ...state.entities[aid]!, x: 100, y: 100 },
+        [hiders[0]!]: { ...state.entities[hiders[0]!]!, x: 110, y: 100, alive: true },
+        [hiders[1]!]: { ...state.entities[hiders[1]!]!, x: 900, y: 900, alive: true },
       },
     };
-    catchRes = attemptCatch(state, sid, aid);
-    expect(catchRes.ok).toBe(false);
+    catchRes = attemptCatch(state, sid, hiders[0]!);
+    expect(catchRes.ok).toBe(true);
     state = catchRes.state;
     expect(state.catchBudgetRemaining).toBe(0);
     expect(state.phase).toBe('ended');
     expect(state.winner).toBe('hiders');
+    expect(state.endReason).toBe('catch_budget_exhausted');
 
-    const reject = attemptCatch(state, sid, aid);
+    const reject = attemptCatch(state, sid, hiders[1]!);
     expect(reject.ok).toBe(false);
     if (!reject.ok) {
-      // after ended, not_playing; or if still playing budget exhausted
       expect(['not_playing', 'catch_budget_exhausted']).toContain(reject.reason);
     }
   });
 
-  it('rejects catching AI as player elimination and accepts human hider', () => {
+  it('allows multiplayer AI catch without spending human budget; human still spends', () => {
     let lobby = createLobby('r1', defaultConfig({ seekerPrepMs: 0, catchBudget: 3, aiCount: 3, catchRange: 80 }));
     let res = joinHuman(lobby, 'p1', 'A', { x: 50, y: 50 });
     res = joinHuman(res.ok ? res.state : lobby, 'p2', 'B', { x: 60, y: 50 });
@@ -161,6 +182,7 @@ describe('timer and catch budget', () => {
     const seekerId = state.seekerId!;
     const hiderId = state.humans.find((h) => h !== seekerId)!;
     const aiId = Object.keys(state.entities).find((id) => state.entities[id]!.kind === 'ai')!;
+    const budgetBefore = state.catchBudgetRemaining;
 
     state = {
       ...state,
@@ -172,15 +194,25 @@ describe('timer and catch budget', () => {
       },
     };
 
+    state = {
+      ...state,
+      phase: 'playing',
+      startSequenceRemainingMs: 0,
+      seekerPrepRemainingMs: 0,
+    };
     const aiCatch = attemptCatch(state, seekerId, aiId);
-    expect(aiCatch.ok).toBe(false);
-    if (!aiCatch.ok) expect(aiCatch.reason).toBe('target_is_ai');
-    expect(aiCatch.state.entities[aiId]?.alive).toBe(true);
+    expect(aiCatch.ok).toBe(true);
+    if (!aiCatch.ok) return;
+    expect(aiCatch.kind).toBe('ai');
+    expect(aiCatch.placeGrave).toBe(false);
+    expect(aiCatch.state.entities[aiId]?.alive).toBe(false);
+    expect(aiCatch.state.catchBudgetRemaining).toBe(budgetBefore - 1);
 
     const humanCatch = attemptCatch(aiCatch.state, seekerId, hiderId);
     expect(humanCatch.ok).toBe(true);
     if (humanCatch.ok) {
       expect(humanCatch.kind).toBe('human');
+      expect(humanCatch.placeGrave).toBe(true);
       expect(humanCatch.state.entities[hiderId]?.alive).toBe(false);
     }
   });
@@ -195,7 +227,7 @@ describe('rematch and rejoin after ended', () => {
     if (!res.ok) return;
     let state = startMatch(res.state, { seed: 5, mode: 'normal' });
     // Finish seeker prep then expire hunt timer
-    state = { ...state, seekerPrepRemainingMs: 0 };
+    state = { ...state, seekerPrepRemainingMs: 0, phase: 'playing', startSequenceRemainingMs: 0 };
     state = tickTimer(state, 100);
     expect(state.phase).toBe('ended');
 
@@ -206,9 +238,9 @@ describe('rematch and rejoin after ended', () => {
     expect(rejoin.state.phase).toBe('lobby');
     expect(rejoin.state.humans).toContain('c');
 
-    // start from ended without explicit join path
+    // start from ended without explicit join path → starting sequence first
     state = startMatch(state, 8);
-    expect(state.phase).toBe('playing');
+    expect(state.phase).toBe('starting');
     expect(state.seekerId).toBeTruthy();
     expect(Object.values(state.entities).some((e) => e.kind === 'ai')).toBe(true);
   });

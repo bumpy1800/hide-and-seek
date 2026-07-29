@@ -1,20 +1,25 @@
 import { describe, expect, it } from 'vitest';
 import {
   SEEKER_PREP_MS,
+  START_SEQUENCE_MS,
   attemptCatch,
   canSeekerAct,
   canSeekerSee,
   createLobby,
   defaultConfig,
+  effectivePrepRemainingMs,
+  isSeekerBlind,
   isSeekerPrepActive,
   joinHuman,
   leaveHuman,
+  seekerPrepRemainingMs,
   setEntityVelocity,
   shouldShowMobileKeypad,
   startMatch,
   startPracticeMatch,
   tickTimer,
   evaluateEndConditions,
+  skipToPlaying,
 } from '../src/index.js';
 
 describe('shouldShowMobileKeypad', () => {
@@ -117,6 +122,9 @@ describe('seeker prep (~10s)', () => {
     if (!res.ok) return;
     let state = startMatch(res.state, { mode: 'normal', seed: 2 });
     const seekerId = state.seekerId!;
+    // Drain fox roulette + countdown → playing with prep armed
+    state = tickTimer(state, START_SEQUENCE_MS);
+    expect(state.phase).toBe('playing');
     expect(state.seekerPrepRemainingMs).toBe(SEEKER_PREP_MS);
     expect(isSeekerPrepActive(state)).toBe(true);
     expect(canSeekerAct(state, seekerId)).toBe(false);
@@ -151,9 +159,70 @@ describe('seeker prep (~10s)', () => {
         [aiId]: { ...state.entities[aiId]!, x: 110, y: 100 },
       },
     };
-    const miss = attemptCatch(state, seekerId, aiId);
-    expect(miss.ok).toBe(false);
-    if (!miss.ok) expect(miss.reason).toBe('target_is_ai');
+    const hit = attemptCatch(state, seekerId, aiId);
+    expect(hit.ok).toBe(true);
+    if (hit.ok) {
+      expect(hit.kind).toBe('ai');
+      expect(hit.placeGrave).toBe(false);
+      expect(hit.state.entities[aiId]!.alive).toBe(false);
+    }
+  });
+
+  it('wall-clock failsafe ends blind when server prep field is stuck', () => {
+    let lobby = createLobby('stuck', defaultConfig({ aiCount: 0, seekerPrepMs: SEEKER_PREP_MS }));
+    let res = joinHuman(lobby, 'a', 'A');
+    res = joinHuman(res.ok ? res.state : lobby, 'b', 'B');
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    let state = startMatch(res.state, { mode: 'normal', seed: 9 });
+    state = tickTimer(state, START_SEQUENCE_MS);
+    const seekerId = state.seekerId!;
+    // Frozen snapshot: prep never ticks (simulates dead multiplayer host)
+    expect(state.phase).toBe('playing');
+    expect(state.seekerPrepRemainingMs).toBe(SEEKER_PREP_MS);
+    const t0 = 1_000_000;
+    const prepEndsAt = t0 + SEEKER_PREP_MS;
+    expect(isSeekerBlind(state, seekerId, t0, prepEndsAt)).toBe(true);
+    expect(effectivePrepRemainingMs(state, t0, prepEndsAt)).toBe(SEEKER_PREP_MS);
+    // After wall clock: still blind if only looking at frozen state field
+    expect(canSeekerSee(state, seekerId)).toBe(false);
+    // But wall-clock helpers reveal
+    expect(isSeekerBlind(state, seekerId, t0 + SEEKER_PREP_MS + 50, prepEndsAt)).toBe(false);
+    expect(effectivePrepRemainingMs(state, t0 + SEEKER_PREP_MS + 50, prepEndsAt)).toBe(0);
+    // NaN / missing prep must never permanent-blind
+    const brokenNaN = { ...state, seekerPrepRemainingMs: Number.NaN };
+    expect(seekerPrepRemainingMs(brokenNaN)).toBe(0);
+    expect(isSeekerPrepActive(brokenNaN)).toBe(false);
+    expect(canSeekerSee(brokenNaN, seekerId)).toBe(true);
+    expect(canSeekerAct(brokenNaN, seekerId)).toBe(true);
+
+    const brokenUndef = {
+      ...state,
+      seekerPrepRemainingMs: undefined as unknown as number,
+    };
+    expect(seekerPrepRemainingMs(brokenUndef)).toBe(0);
+    expect(isSeekerPrepActive(brokenUndef)).toBe(false);
+    expect(canSeekerSee(brokenUndef, seekerId)).toBe(true);
+    expect(canSeekerAct(brokenUndef, seekerId)).toBe(true);
+  });
+
+  it('host tick path reduces prep to zero within ~10s of simulated time', () => {
+    let lobby = createLobby('host-tick', defaultConfig({ aiCount: 1, seekerPrepMs: SEEKER_PREP_MS }));
+    let res = joinHuman(lobby, 'host', 'Host');
+    res = joinHuman(res.ok ? res.state : lobby, 'guest', 'Guest');
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    let state = startMatch(res.state, { mode: 'normal', seed: 3 });
+    state = tickTimer(state, START_SEQUENCE_MS);
+    expect(state.phase).toBe('playing');
+    expect(state.seekerPrepRemainingMs).toBe(SEEKER_PREP_MS);
+    // Simulate 50ms host ticks for 10s of prep
+    for (let i = 0; i < 200; i++) {
+      state = tickTimer(state, 50);
+    }
+    expect(state.seekerPrepRemainingMs).toBe(0);
+    expect(isSeekerPrepActive(state)).toBe(false);
+    expect(canSeekerSee(state, state.seekerId!)).toBe(true);
   });
 });
 
@@ -221,8 +290,8 @@ describe('AI count = rabbit users × 5', () => {
     expect(state.mode).toBe('practice');
   });
 
-  it('normal match AI count is (humans - seeker) × 5', () => {
-    let lobby = createLobby('n', defaultConfig());
+  it('normal match uses host-configured AI count', () => {
+    let lobby = createLobby('n', defaultConfig({ aiCount: 6 }));
     for (const id of ['a', 'b', 'c']) {
       const r = joinHuman(lobby, id, id);
       expect(r.ok).toBe(true);
@@ -230,9 +299,9 @@ describe('AI count = rabbit users × 5', () => {
     }
     const state = startMatch(lobby, { mode: 'normal', seed: 1 });
     const ais = Object.values(state.entities).filter((e) => e.kind === 'ai');
-    // 3 humans → 1 seeker + 2 rabbits → 10 AI
-    expect(ais).toHaveLength(10);
-    expect(state.config.aiCount).toBe(10);
+    expect(ais).toHaveLength(6);
+    expect(state.config.aiCount).toBe(6);
+    expect(state.phase).toBe('starting');
   });
 });
 

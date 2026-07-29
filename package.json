@@ -2,13 +2,15 @@
   "name": "hide-and-seek",
   "private": true,
   "version": "1.0.0",
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "dev": "npm run dev -w @hide-and-seek/client",
     "dev:server": "npm run dev -w @hide-and-seek/server",
     "dev:all": "concurrently -k \"npm run dev:server\" \"npm run dev\"",
     "build": "npm run build -w @hide-and-seek/shared && npm run build -w @hide-and-seek/client && npm run build -w @hide-and-seek/server",
-    "test": "npm run test -w @hide-and-seek/shared && npm run test -w @hide-and-seek/server",
+    "test": "npm run test -w @hide-and-seek/shared && npm run test -w @hide-and-seek/server && npm run test -w @hide-and-seek/client",
     "start:server": "npm run start -w @hide-and-seek/server"
   },
   "devDependencies": {

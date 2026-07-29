@@ -30,13 +30,16 @@ export class LocalPracticeHost {
   private readonly tickMs = 50;
   onMessage: LocalHostHandler | null = null;
 
-  constructor(private practiceRole: PracticeRole) {
+  constructor(
+    private practiceRole: PracticeRole,
+    private playerName = '나',
+  ) {
     this.state = createLobby(`local-practice-${practiceRole}`, defaultConfig());
   }
 
   start(): void {
-    // Join as single human
-    const joined = joinHuman(this.state, this.playerId, 'You');
+    // Join as single human with chosen nickname
+    const joined = joinHuman(this.state, this.playerId, this.playerName);
     if (!joined.ok) {
       this.emit({ type: 'error', message: joined.reason });
       return;
@@ -89,7 +92,17 @@ export class LocalPracticeHost {
       this.emit({
         type: 'event',
         event: result.ok ? 'catch_success' : 'catch_fail',
-        detail: result,
+        detail: result.ok
+          ? {
+              ok: true,
+              kind: result.kind,
+              name: result.name,
+              x: result.x,
+              y: result.y,
+              caughtId: result.caughtId,
+              placeGrave: result.placeGrave,
+            }
+          : result,
       });
       this.emitSnapshot();
     }

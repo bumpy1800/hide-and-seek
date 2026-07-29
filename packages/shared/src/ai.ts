@@ -38,8 +38,64 @@ export function aiRabbitMoveSpeed(): number {
 }
 
 /**
+ * 8 unit directions humans can express with WASD/arrows (cardinals + diagonals).
+ * Diagonals are normalized so speed magnitude stays equal.
+ */
+export const EIGHT_DIR_UNIT: ReadonlyArray<readonly [number, number]> = [
+  [1, 0],
+  [-1, 0],
+  [0, 1],
+  [0, -1],
+  [Math.SQRT1_2, Math.SQRT1_2],
+  [Math.SQRT1_2, -Math.SQRT1_2],
+  [-Math.SQRT1_2, Math.SQRT1_2],
+  [-Math.SQRT1_2, -Math.SQRT1_2],
+];
+
+/**
+ * Snap a free aim vector onto the nearest 8-direction unit vector.
+ * Zero (or near-zero) input → {0,0}.
+ */
+export function quantizeTo8Dir(
+  dx: number,
+  dy: number,
+  eps = 1e-6,
+): { nx: number; ny: number } {
+  if (!Number.isFinite(dx) || !Number.isFinite(dy)) return { nx: 0, ny: 0 };
+  const len = Math.hypot(dx, dy);
+  if (len < eps) return { nx: 0, ny: 0 };
+  const ix = dx / len;
+  const iy = dy / len;
+  let best = EIGHT_DIR_UNIT[0]!;
+  let bestDot = -Infinity;
+  for (const d of EIGHT_DIR_UNIT) {
+    const dot = ix * d[0] + iy * d[1];
+    if (dot > bestDot) {
+      bestDot = dot;
+      best = d;
+    }
+  }
+  return { nx: best[0], ny: best[1] };
+}
+
+/** True if (vx,vy) is ~0 or lies on an 8-dir ray at the given speed. */
+export function isEightDirVelocity(
+  vx: number,
+  vy: number,
+  speed: number,
+  tol = 0.5,
+): boolean {
+  const mag = Math.hypot(vx, vy);
+  if (mag < tol) return true;
+  const { nx, ny } = quantizeTo8Dir(vx, vy);
+  const ex = nx * speed;
+  const ey = ny * speed;
+  return Math.hypot(vx - ex, vy - ey) <= tol;
+}
+
+/**
  * Update AI velocities with simple waypoint / idle patterns so they blend with hiders.
- * Uses the same base speed as human rabbits (no systematic slower variance).
+ * Velocities are quantized to 8 directions (same axes human input uses).
  */
 export function stepAiCrowd(state: MatchState, dtMs: number, seed = 1): MatchState {
   if (state.phase !== 'playing') return state;
@@ -68,9 +124,7 @@ export function stepAiCrowd(state: MatchState, dtMs: number, seed = 1): MatchSta
       brain.idleMs -= dtMs;
       entities[e.id] = { ...e, vx: 0, vy: 0 };
     } else {
-      const nx = dx / dist;
-      const ny = dy / dist;
-      // Same magnitude as human rabbit — no 0.75–1.5 multiplier lag
+      const { nx, ny } = quantizeTo8Dir(dx, dy);
       entities[e.id] = { ...e, vx: nx * speed, vy: ny * speed };
     }
   }

@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import type { ServerMessage } from '@hide-and-seek/shared';
-import { RoomManager, type SocketLike } from '../src/room.js';
+import {
+  SEEKER_PREP_MS,
+  START_SEQUENCE_MS,
+  canSeekerSee,
+  isSeekerBlind,
+  isSeekerPrepActive,
+  type ServerMessage,
+} from '@hide-and-seek/shared';
+import { RoomManager, type SocketLike, type Room } from '../src/room.js';
 
 class FakeSocket implements SocketLike {
   readyState = 1;
@@ -14,6 +21,19 @@ class FakeSocket implements SocketLike {
       if (m.type === 'snapshot') return m;
     }
     return undefined;
+  }
+}
+
+/**
+ * Drain fox-roulette + 3s countdown until phase becomes `playing`.
+ * Stops on the transition tick so prep is still full (SEEKER_PREP_MS).
+ */
+function advancePastStartSequence(room: Room, tickMs = 50): void {
+  let guard = 0;
+  const maxTicks = Math.ceil(START_SEQUENCE_MS / tickMs) + 5;
+  while (room.state.phase === 'starting' && guard < maxTicks) {
+    room.tick(tickMs);
+    guard += 1;
   }
 }
 
@@ -54,15 +74,25 @@ describe('multiplayer room host (in-process dual clients)', () => {
     b.messages = [];
     room.applyIntent('player-a', { type: 'start' });
 
-    const snapA = a.lastSnapshot();
-    const snapB = b.lastSnapshot();
-    expect(snapA?.type).toBe('snapshot');
-    expect(snapB?.type).toBe('snapshot');
-    expect(snapA!.state.seekerId).toBe(snapB!.state.seekerId);
-    expect(snapA!.state.phase).toBe('playing');
-    expect(snapA!.state.humans).toEqual(expect.arrayContaining(['player-a', 'player-b']));
+    const snapStartA = a.lastSnapshot();
+    const snapStartB = b.lastSnapshot();
+    expect(snapStartA?.type).toBe('snapshot');
+    expect(snapStartB?.type).toBe('snapshot');
+    expect(snapStartA!.state.seekerId).toBe(snapStartB!.state.seekerId);
+    // Normal start enters fox-roulette / countdown first
+    expect(snapStartA!.state.phase).toBe('starting');
+    expect(snapStartA!.state.humans).toEqual(
+      expect.arrayContaining(['player-a', 'player-b']),
+    );
 
-    const seekerId = snapA!.state.seekerId!;
+    advancePastStartSequence(room);
+    const snapA = a.lastSnapshot()!;
+    const snapB = b.lastSnapshot()!;
+    expect(snapA.state.phase).toBe('playing');
+    expect(snapB.state.phase).toBe('playing');
+    expect(snapA.state.seekerPrepRemainingMs).toBe(SEEKER_PREP_MS);
+
+    const seekerId = snapA.state.seekerId!;
     const hiderId = seekerId === 'player-a' ? 'player-b' : 'player-a';
 
     // Move hider — both should see new velocity after intent (via next snapshot on catch or tick)
@@ -71,7 +101,9 @@ describe('multiplayer room host (in-process dual clients)', () => {
     const afterMoveA = a.lastSnapshot()!;
     const afterMoveB = b.lastSnapshot()!;
     expect(afterMoveA.state.entities[hiderId]!.vx).toBeGreaterThan(0);
-    expect(afterMoveB.state.entities[hiderId]!.vx).toBe(afterMoveA.state.entities[hiderId]!.vx);
+    expect(afterMoveB.state.entities[hiderId]!.vx).toBe(
+      afterMoveA.state.entities[hiderId]!.vx,
+    );
 
     // Place seeker next to hider and catch (skip prep window)
     room.state = {
@@ -102,6 +134,8 @@ describe('rematch after match ends', () => {
     manager.joinRoom('rematch-room', 'p2', b, 'B');
     const room = manager.get('rematch-room')!;
     room.applyIntent('p1', { type: 'start' });
+    expect(room.state.phase).toBe('starting');
+    advancePastStartSequence(room);
     expect(room.state.phase).toBe('playing');
 
     // Force end
@@ -112,6 +146,8 @@ describe('rematch after match ends', () => {
     a.messages = [];
     b.messages = [];
     room.applyIntent('p2', { type: 'start' });
+    expect(room.state.phase).toBe('starting');
+    advancePastStartSequence(room);
     expect(room.state.phase).toBe('playing');
     const snapA = a.lastSnapshot();
     const snapB = b.lastSnapshot();
@@ -132,7 +168,7 @@ describe('rematch after match ends', () => {
 });
 
 describe('practice and seeker prep on room host', () => {
-  it('practice start has no seeker; prep blocks seeker move until elapsed', () => {
+  it('practice start has no seeker; prep blocks seeker move until host ticks elapse full prep', () => {
     const manager = new RoomManager();
     const a = new FakeSocket();
     manager.joinRoom('practice-room', 'solo', a, 'Solo');
@@ -149,17 +185,72 @@ describe('practice and seeker prep on room host', () => {
     manager2.joinRoom('prep-room', 'hide', h, 'H');
     const r2 = manager2.get('prep-room')!;
     r2.applyIntent('seek', { type: 'start', mode: 'normal' });
-    expect(r2.state.seekerPrepRemainingMs).toBeGreaterThan(0);
+    expect(r2.state.phase).toBe('starting');
+    advancePastStartSequence(r2);
+    expect(r2.state.phase).toBe('playing');
+    expect(r2.state.seekerPrepRemainingMs).toBe(SEEKER_PREP_MS);
     const sid = r2.state.seekerId!;
     const before = { ...r2.state.entities[sid]! };
     r2.applyIntent(sid, { type: 'move', dx: 1, dy: 0 });
     // prep freezes seeker velocity
     expect(r2.state.entities[sid]!.vx).toBe(0);
-    // elapse prep
-    r2.state = { ...r2.state, seekerPrepRemainingMs: 0 };
+    expect(canSeekerSee(r2.state, sid)).toBe(false);
+    expect(isSeekerPrepActive(r2.state)).toBe(true);
+
+    // Drive shipped host ticks for the full prep window (no force-zero)
+    const tickMs = 50;
+    const ticks = Math.ceil(SEEKER_PREP_MS / tickMs);
+    for (let i = 0; i < ticks; i++) {
+      r2.tick(tickMs);
+    }
+
+    const seekerSnap = s.lastSnapshot();
+    const hiderSnap = h.lastSnapshot();
+    expect(seekerSnap?.state.seekerPrepRemainingMs).toBeLessThanOrEqual(0);
+    expect(hiderSnap?.state.seekerPrepRemainingMs).toBeLessThanOrEqual(0);
+    expect(canSeekerSee(seekerSnap!.state, sid)).toBe(true);
+    expect(isSeekerBlind(seekerSnap!.state, sid)).toBe(false);
+    expect(isSeekerPrepActive(seekerSnap!.state)).toBe(false);
+
     r2.applyIntent(sid, { type: 'move', dx: 1, dy: 0 });
     expect(r2.state.entities[sid]!.vx).toBeGreaterThan(0);
     expect(before.id).toBe(sid);
+  });
+
+  it('dual clients: host ticks ≥ SEEKER_PREP_MS then seeker snapshot is not blind', () => {
+    const manager = new RoomManager();
+    const foxSock = new FakeSocket();
+    const rabbitSock = new FakeSocket();
+    manager.joinRoom('dual-prep', 'fox', foxSock, 'Fox');
+    manager.joinRoom('dual-prep', 'rabbit', rabbitSock, 'Rabbit');
+    const room = manager.get('dual-prep')!;
+    room.applyIntent('fox', { type: 'start', mode: 'normal' });
+
+    expect(foxSock.lastSnapshot()!.state.phase).toBe('starting');
+    advancePastStartSequence(room);
+
+    const startSnap = foxSock.lastSnapshot()!;
+    expect(startSnap.state.phase).toBe('playing');
+    expect(startSnap.state.seekerPrepRemainingMs).toBe(SEEKER_PREP_MS);
+    const seekerId = startSnap.state.seekerId!;
+    expect(canSeekerSee(startSnap.state, seekerId)).toBe(false);
+
+    // Simulate PeerMultiplayer/Room host 50ms cadence over full prep
+    const tickMs = 50;
+    for (let elapsed = 0; elapsed < SEEKER_PREP_MS; elapsed += tickMs) {
+      room.tick(tickMs);
+    }
+    // one extra tick in case of flooring
+    room.tick(tickMs);
+
+    const foxEnd = foxSock.lastSnapshot()!;
+    const rabbitEnd = rabbitSock.lastSnapshot()!;
+    expect(foxEnd.state.seekerPrepRemainingMs).toBeLessThanOrEqual(0);
+    expect(rabbitEnd.state.seekerPrepRemainingMs).toBeLessThanOrEqual(0);
+    expect(foxEnd.state.seekerId).toBe(rabbitEnd.state.seekerId);
+    expect(canSeekerSee(foxEnd.state, seekerId)).toBe(true);
+    expect(isSeekerBlind(foxEnd.state, seekerId)).toBe(false);
+    expect(isSeekerPrepActive(foxEnd.state)).toBe(false);
   });
 });
 
