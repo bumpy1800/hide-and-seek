@@ -37,11 +37,11 @@ describe('Phaser system integration (structural)', () => {
     expect(src).toMatch(/repeat:\s*-1/);
   });
 
-  it('GameScene uses Arcade physics sprites + collider + play(anim)', () => {
+  it('GameScene uses Arcade physics sprites + play(anim)', () => {
     const src = readFileSync(resolve(root, 'scenes/GameScene.ts'), 'utf8');
     expect(src).toMatch(/physics\.add\.sprite/);
     expect(src).toMatch(/physics\.add\.group/);
-    expect(src).toMatch(/physics\.add\.collider/);
+    // Prop solids are visual cover only — no entity↔solid collider (sticky rollback)
     expect(src).toMatch(/setVelocity/);
     expect(src).toMatch(/\.play\(/);
     expect(src).toMatch(/animalAnimKey|animKeyFor/);

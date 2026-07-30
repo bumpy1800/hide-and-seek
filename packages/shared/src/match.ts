@@ -23,7 +23,6 @@ import {
   DEFAULT_MEADOW_SEED,
   ENTITY_COLLIDE_RADIUS,
   getSolidObstacles,
-  meadowSeedFromMatchSeed,
   newRoomMeadowSeed,
   resolveSolidCollisions,
   type SolidObstacle,
@@ -870,7 +869,7 @@ export function integrateMotion(state: MatchState, dtSec: number): MatchState {
     }
     let x = e.x + e.vx * dtSec;
     let y = e.y + e.vy * dtSec;
-    // Solid props (tree / rock) for this match's meadowSeed — bushes stay walkable cover
+    // Tree/rock solid circles (bushes remain walkable cover)
     const solids = solidsForMeadowSeed(state.meadowSeed ?? DEFAULT_MEADOW_SEED);
     const hit = resolveSolidCollisions(x, y, ENTITY_COLLIDE_RADIUS, solids);
     x = clamp(hit.x, 16, mapW - 16);

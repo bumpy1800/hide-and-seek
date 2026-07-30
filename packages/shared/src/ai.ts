@@ -1,15 +1,38 @@
 import type { EntityState, MatchState } from './types.js';
-import { AI_SPEED } from './types.js';
+import { AI_SPEED, MAP_HEIGHT, MAP_WIDTH } from './types.js';
 import { createRng } from './rng.js';
+import {
+  DEFAULT_MEADOW_SEED,
+  ENTITY_COLLIDE_RADIUS,
+  getSolidObstacles,
+  resolveSolidCollisions,
+  type SolidObstacle,
+} from './meadowLayout.js';
 
 type AiBrain = {
   targetX: number;
   targetY: number;
   idleMs: number;
+  /** Accumulated ms with near-zero progress while trying to move (anti-stick). */
+  stuckMs: number;
+  lastX: number;
+  lastY: number;
 };
 
 /** Keyed by `${roomId}:${entityId}` so concurrent rooms never share brains. */
 const brains = new Map<string, AiBrain>();
+
+const solidsCache = new Map<number, SolidObstacle[]>();
+
+function solidsForSeed(seed: number): SolidObstacle[] {
+  const key = seed >>> 0;
+  let s = solidsCache.get(key);
+  if (!s) {
+    s = getSolidObstacles(key);
+    solidsCache.set(key, s);
+  }
+  return s;
+}
 
 function brainKey(roomId: string, entityId: string): string {
   return `${roomId}:${entityId}`;
@@ -93,9 +116,107 @@ export function isEightDirVelocity(
   return Math.hypot(vx - ex, vy - ey) <= tol;
 }
 
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+/** Point not deep inside a solid (resolved free position). */
+export function freePointNear(
+  x: number,
+  y: number,
+  solids: readonly SolidObstacle[],
+  entityRadius = ENTITY_COLLIDE_RADIUS,
+  mapW = MAP_WIDTH,
+  mapH = MAP_HEIGHT,
+): { x: number; y: number } {
+  const hit = resolveSolidCollisions(x, y, entityRadius, solids);
+  return {
+    x: clamp(hit.x, 24, mapW - 24),
+    y: clamp(hit.y, 24, mapH - 24),
+  };
+}
+
 /**
- * Update AI velocities with simple waypoint / idle patterns so they blend with hiders.
- * Velocities are quantized to 8 directions (same axes human input uses).
+ * How far an entity would travel in `dtSec` along unit dir after solid resolution.
+ * Small moved ⇒ that direction is blocked (stuck into tree/rock).
+ */
+export function probeDirTravel(
+  x: number,
+  y: number,
+  nx: number,
+  ny: number,
+  speed: number,
+  dtSec: number,
+  solids: readonly SolidObstacle[],
+  entityRadius = ENTITY_COLLIDE_RADIUS,
+  mapW = MAP_WIDTH,
+  mapH = MAP_HEIGHT,
+): number {
+  const step = speed * dtSec;
+  const rawX = x + nx * step;
+  const rawY = y + ny * step;
+  const hit = resolveSolidCollisions(rawX, rawY, entityRadius, solids);
+  const px = clamp(hit.x, 16, mapW - 16);
+  const py = clamp(hit.y, 16, mapH - 16);
+  return Math.hypot(px - x, py - y);
+}
+
+/**
+ * Pick an 8-dir that actually moves, preferring progress toward (tx,ty).
+ * Returns null if every direction is blocked (then brain should re-path).
+ */
+export function pickUnblockedEightDir(
+  x: number,
+  y: number,
+  tx: number,
+  ty: number,
+  speed: number,
+  solids: readonly SolidObstacle[],
+  entityRadius = ENTITY_COLLIDE_RADIUS,
+  mapW = MAP_WIDTH,
+  mapH = MAP_HEIGHT,
+  dtSec = 0.05,
+): { nx: number; ny: number } | null {
+  const desired = quantizeTo8Dir(tx - x, ty - y);
+  const minTravel = speed * dtSec * 0.28;
+  const ranked = [...EIGHT_DIR_UNIT].sort((a, b) => {
+    const da = a[0] * desired.nx + a[1] * desired.ny;
+    const db = b[0] * desired.nx + b[1] * desired.ny;
+    return db - da;
+  });
+  let best: { nx: number; ny: number; score: number } | null = null;
+  for (const d of ranked) {
+    const travel = probeDirTravel(x, y, d[0], d[1], speed, dtSec, solids, entityRadius, mapW, mapH);
+    if (travel < minTravel) continue;
+    // Prefer dirs that both move and head toward target
+    const toward = d[0] * desired.nx + d[1] * desired.ny;
+    const score = travel + toward * speed * dtSec;
+    if (!best || score > best.score) {
+      best = { nx: d[0], ny: d[1], score };
+    }
+  }
+  return best ? { nx: best.nx, ny: best.ny } : null;
+}
+
+function rollWaypoint(
+  rng: () => number,
+  mapW: number,
+  mapH: number,
+  solids: readonly SolidObstacle[],
+): { targetX: number; targetY: number; idleMs: number } {
+  let x = 40 + rng() * (mapW - 80);
+  let y = 40 + rng() * (mapH - 80);
+  const free = freePointNear(x, y, solids, ENTITY_COLLIDE_RADIUS, mapW, mapH);
+  return {
+    targetX: free.x,
+    targetY: free.y,
+    idleMs: 350 + rng() * 1400,
+  };
+}
+
+/**
+ * Update AI velocities with waypoint / idle patterns.
+ * Velocities are 8-dir and prefer unblocked paths so AI does not grind into trees.
  */
 export function stepAiCrowd(state: MatchState, dtMs: number, seed = 1): MatchState {
   if (state.phase !== 'playing') return state;
@@ -103,29 +224,72 @@ export function stepAiCrowd(state: MatchState, dtMs: number, seed = 1): MatchSta
   const entities: Record<string, EntityState> = { ...state.entities };
   const roomId = state.roomId;
   const speed = aiRabbitMoveSpeed();
+  const mapW = state.config.mapWidth;
+  const mapH = state.config.mapHeight;
+  const solids = solidsForSeed(state.meadowSeed ?? DEFAULT_MEADOW_SEED);
+  const stuckLimitMs = 450;
 
   for (const e of Object.values(state.entities)) {
     if (e.kind !== 'ai' || !e.alive) continue;
     const key = brainKey(roomId, e.id);
     let brain = brains.get(key);
     if (!brain || brain.idleMs <= 0) {
+      const wp = rollWaypoint(rng, mapW, mapH, solids);
       brain = {
-        targetX: 40 + rng() * (state.config.mapWidth - 80),
-        targetY: 40 + rng() * (state.config.mapHeight - 80),
-        idleMs: 400 + rng() * 1800,
+        ...wp,
+        stuckMs: 0,
+        lastX: e.x,
+        lastY: e.y,
       };
       brains.set(key, brain);
+    }
+
+    // Detect physical stick: asked to move but almost no position change
+    const moved = Math.hypot(e.x - brain.lastX, e.y - brain.lastY);
+    const wasTrying = Math.hypot(e.vx, e.vy) > 1;
+    if (wasTrying && moved < 1.2) {
+      brain.stuckMs += dtMs;
+    } else {
+      brain.stuckMs = Math.max(0, brain.stuckMs - dtMs * 0.5);
+    }
+    brain.lastX = e.x;
+    brain.lastY = e.y;
+
+    if (brain.stuckMs >= stuckLimitMs) {
+      const wp = rollWaypoint(rng, mapW, mapH, solids);
+      brain.targetX = wp.targetX;
+      brain.targetY = wp.targetY;
+      brain.idleMs = wp.idleMs;
+      brain.stuckMs = 0;
     }
 
     const dx = brain.targetX - e.x;
     const dy = brain.targetY - e.y;
     const dist = Math.hypot(dx, dy);
-    if (dist < 12) {
+    if (dist < 14) {
       brain.idleMs -= dtMs;
       entities[e.id] = { ...e, vx: 0, vy: 0 };
     } else {
-      const { nx, ny } = quantizeTo8Dir(dx, dy);
-      entities[e.id] = { ...e, vx: nx * speed, vy: ny * speed };
+      const dir = pickUnblockedEightDir(
+        e.x,
+        e.y,
+        brain.targetX,
+        brain.targetY,
+        speed,
+        solids,
+        ENTITY_COLLIDE_RADIUS,
+        mapW,
+        mapH,
+        0.05,
+      );
+      if (!dir) {
+        // Fully boxed — repath next tick
+        brain.idleMs = 0;
+        brain.stuckMs = stuckLimitMs;
+        entities[e.id] = { ...e, vx: 0, vy: 0 };
+      } else {
+        entities[e.id] = { ...e, vx: dir.nx * speed, vy: dir.ny * speed };
+      }
     }
   }
 

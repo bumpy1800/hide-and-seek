@@ -141,13 +141,10 @@ export class GameScene extends Phaser.Scene {
       collideWorldBounds: true,
       allowGravity: false,
     });
-    // Tilemap + decor + Arcade static solids (seed rebuilt each match)
+    // Tilemap + decor (visual only — no solid blocking; free movement)
     this.meadowSeed = DEFAULT_MEADOW_SEED;
     this.meadow = buildMeadowWorld(this, this.meadowSeed);
-    this.solidCollider = this.physics.add.collider(
-      this.entityGroup,
-      this.meadow.solidGroup,
-    );
+    this.solidCollider = null;
 
     this.cameras.main.setBounds(0, 0, MAP_WIDTH, MAP_HEIGHT);
     this.cameras.main.setBackgroundColor('#5d8a3e');
@@ -319,10 +316,8 @@ export class GameScene extends Phaser.Scene {
     destroyMeadowWorld(this.meadow);
     this.meadowSeed = s;
     this.meadow = buildMeadowWorld(this, s);
-    this.solidCollider = this.physics.add.collider(
-      this.entityGroup,
-      this.meadow.solidGroup,
-    );
+    // No entity↔solid collider — props are cover only (avoids sticky blocking)
+    this.solidCollider = null;
   }
 
   /** Keep non-predicted sprites on host/snapshot x,y after physics. */
@@ -912,29 +907,23 @@ export class GameScene extends Phaser.Scene {
       const isLocal = e.id === you;
       if (body) {
         body.reset(display.x, display.y);
-        // Only the local player collides with tree/rock; remotes stay on network coords
-        // (otherwise Arcade separation pushes them off true positions — very visible at end)
-        const allowLocalPhysics =
+        // No solid prop collision — prediction only for feel between snapshots
+        body.checkCollision.none = true;
+        const allowLocalPredict =
           isLocal &&
           e.alive &&
           !matchOver &&
           state.phase === 'playing' &&
           !(seekerBlind && state.seekerId === you);
-        if (allowLocalPhysics) {
+        if (allowLocalPredict) {
           body.enable = true;
           body.moves = true;
-          body.checkCollision.none = false;
           const isSeeker = state.seekerId === you;
           const speed = isSeeker ? SEEKER_SPEED : RABBIT_SPEED;
           body.setVelocity(this.lastMoveSent.dx * speed, this.lastMoveSent.dy * speed);
         } else {
           body.setVelocity(0, 0);
           body.moves = false;
-          // Remotes / end-screen: do not resolve vs static solids
-          body.checkCollision.none = true;
-          if (matchOver || !isLocal) {
-            body.enable = true; // keep for group membership; no collision response
-          }
         }
       }
 

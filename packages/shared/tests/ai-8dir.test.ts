@@ -1,10 +1,15 @@
 import { describe, expect, it, beforeEach } from 'vitest';
 import {
   AI_SPEED,
+  ENTITY_COLLIDE_RADIUS,
   createLobby,
   defaultConfig,
+  getSolidObstacles,
+  integrateMotion,
   isEightDirVelocity,
   joinHuman,
+  pickUnblockedEightDir,
+  probeDirTravel,
   quantizeTo8Dir,
   resetAiBrains,
   skipToPlaying,
@@ -59,5 +64,55 @@ describe('stepAiCrowd 8-direction velocities', () => {
         }
       }
     }
+  });
+
+  it('pickUnblockedEightDir avoids charging into a solid circle', () => {
+    const solids = getSolidObstacles(7);
+    const rock = solids[0]!;
+    // Stand just outside rock, target is through the rock center
+    const x = rock.x - (rock.radius + ENTITY_COLLIDE_RADIUS + 4);
+    const y = rock.y;
+    const dir = pickUnblockedEightDir(
+      x,
+      y,
+      rock.x + 80,
+      rock.y,
+      AI_SPEED,
+      solids,
+    );
+    expect(dir).not.toBeNull();
+    if (dir) {
+      const travel = probeDirTravel(x, y, dir.nx, dir.ny, AI_SPEED, 0.05, solids);
+      expect(travel).toBeGreaterThan(AI_SPEED * 0.05 * 0.25);
+    }
+  });
+
+  it('AI does not stay jammed forever against solids (repath / slide)', () => {
+    let lobby = createLobby('unstuck', defaultConfig({ aiCount: 8, seekerPrepMs: 0 }));
+    let res = joinHuman(lobby, 'a', 'A');
+    res = joinHuman(res.ok ? res.state : lobby, 'b', 'B');
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    let state = skipToPlaying(startMatch(res.state, { mode: 'normal', seed: 3 }));
+    // Run many AI + motion ticks; all AI should change position over the window
+    const startPos = new Map(
+      Object.values(state.entities)
+        .filter((e) => e.kind === 'ai')
+        .map((e) => [e.id, { x: e.x, y: e.y }] as const),
+    );
+    for (let i = 0; i < 120; i++) {
+      state = stepAiCrowd(state, 50, i + 1);
+      state = integrateMotion(state, 0.05);
+      state = { ...state, tick: state.tick + 1 };
+    }
+    let movedCount = 0;
+    for (const e of Object.values(state.entities)) {
+      if (e.kind !== 'ai' || !e.alive) continue;
+      const s = startPos.get(e.id);
+      if (!s) continue;
+      if (Math.hypot(e.x - s.x, e.y - s.y) > 20) movedCount += 1;
+    }
+    // Most AI should have relocated rather than grind one wall forever
+    expect(movedCount).toBeGreaterThanOrEqual(Math.floor(startPos.size * 0.5));
   });
 });

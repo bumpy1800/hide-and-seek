@@ -60,10 +60,8 @@ describe('meadow solid obstacles (tree/rock)', () => {
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     let state = startMatch(res.state, { mode: 'normal', seed: 1 });
-    // Use this match's meadow solids (seeded layout)
     const solids = getSolidObstacles(state.meadowSeed);
     const target = solids[0]!;
-    // Snap a free player next to the obstacle and walk straight into it
     const moverId = state.humans.find((h) => h !== state.seekerId) ?? state.humans[0]!;
     const approachX = target.x - (target.radius + ENTITY_COLLIDE_RADIUS + 8);
     state = {
@@ -90,3 +88,4 @@ describe('meadow solid obstacles (tree/rock)', () => {
     expect(d).toBeGreaterThanOrEqual(target.radius + ENTITY_COLLIDE_RADIUS - 1);
   });
 });
+
