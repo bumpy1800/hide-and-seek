@@ -3,69 +3,101 @@ import {
   AI_SPEED,
   createLobby,
   defaultConfig,
-  integrateMotion,
+  isEightDirVelocity,
   joinHuman,
+  quantizeTo8Dir,
   resetAiBrains,
   skipToPlaying,
   startMatch,
   stepAiCrowd,
 } from '../src/index.js';
 
-/**
- * Original rabbit AI movement: continuous aim toward waypoints (not 8-dir),
- * map-bounds integration only.
- */
-describe('original continuous AI rabbit movement', () => {
+describe('quantizeTo8Dir', () => {
+  it('maps continuous angles onto 8 human-reachable directions', () => {
+    const e = quantizeTo8Dir(1, 0);
+    expect(e.nx).toBeCloseTo(1, 5);
+    expect(e.ny).toBeCloseTo(0, 5);
+    const ne = quantizeTo8Dir(1, 1);
+    expect(ne.nx).toBeCloseTo(Math.SQRT1_2, 5);
+    expect(ne.ny).toBeCloseTo(Math.SQRT1_2, 5);
+    const odd = quantizeTo8Dir(0.3, 0.9);
+    expect(Math.hypot(odd.nx, odd.ny)).toBeCloseTo(1, 5);
+    expect(isEightDirVelocity(odd.nx * AI_SPEED, odd.ny * AI_SPEED, AI_SPEED)).toBe(
+      true,
+    );
+  });
+
+  it('returns zero for near-zero input', () => {
+    expect(quantizeTo8Dir(0, 0)).toEqual({ nx: 0, ny: 0 });
+  });
+});
+
+describe('stepAiCrowd 8-direction velocities', () => {
   beforeEach(() => {
     resetAiBrains();
   });
 
-  it('AI velocity is continuous toward waypoint at AI_SPEED', () => {
-    let lobby = createLobby('ai-cont', defaultConfig({ aiCount: 6, seekerPrepMs: 0 }));
+  it('moving AI only use 8-dir velocities at AI_SPEED', () => {
+    let lobby = createLobby('ai8', defaultConfig({ aiCount: 12, seekerPrepMs: 0 }));
     let res = joinHuman(lobby, 'a', 'A');
     res = joinHuman(res.ok ? res.state : lobby, 'b', 'B');
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     let state = skipToPlaying(startMatch(res.state, { mode: 'normal', seed: 42 }));
-    let anyMoving = false;
-    for (let i = 0; i < 30; i++) {
+    const speed = AI_SPEED;
+    for (let i = 0; i < 40; i++) {
       state = stepAiCrowd(state, 50, i + 1);
       state = { ...state, tick: state.tick + 1 };
       for (const e of Object.values(state.entities)) {
         if (e.kind !== 'ai' || !e.alive) continue;
+        expect(isEightDirVelocity(e.vx, e.vy, speed, 1)).toBe(true);
         const mag = Math.hypot(e.vx, e.vy);
         if (mag > 1) {
-          anyMoving = true;
-          expect(mag).toBeCloseTo(AI_SPEED, 0);
+          expect(mag).toBeCloseTo(speed, 0);
         }
       }
     }
-    expect(anyMoving).toBe(true);
   });
 
-  it('AI positions change freely over time (no solid blocking in integrateMotion)', () => {
-    let lobby = createLobby('ai-free', defaultConfig({ aiCount: 8, seekerPrepMs: 0 }));
+  it('holds one 8-dir across consecutive ticks (keyboard-like, not re-snap every frame)', () => {
+    let lobby = createLobby('hold', defaultConfig({ aiCount: 10, seekerPrepMs: 0 }));
     let res = joinHuman(lobby, 'a', 'A');
     res = joinHuman(res.ok ? res.state : lobby, 'b', 'B');
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    let state = skipToPlaying(startMatch(res.state, { mode: 'normal', seed: 7 }));
-    const start = new Map(
-      Object.values(state.entities)
-        .filter((e) => e.kind === 'ai')
-        .map((e) => [e.id, { x: e.x, y: e.y }] as const),
-    );
-    for (let i = 0; i < 80; i++) {
-      state = stepAiCrowd(state, 50, i + 1);
-      state = integrateMotion(state, 0.05);
-      state = { ...state, tick: state.tick + 1 };
-    }
-    let moved = 0;
+    let state = skipToPlaying(startMatch(res.state, { mode: 'normal', seed: 11 }));
+
+    // Warm up so brains have a locked dir
+    state = stepAiCrowd(state, 50, 1);
+    state = { ...state, tick: state.tick + 1 };
+
+    const prev = new Map<string, { vx: number; vy: number }>();
     for (const e of Object.values(state.entities)) {
-      if (e.kind !== 'ai') continue;
-      const s = start.get(e.id);
-      if (s && Math.hypot(e.x - s.x, e.y - s.y) > 15) moved += 1;
+      if (e.kind === 'ai' && Math.hypot(e.vx, e.vy) > 1) {
+        prev.set(e.id, { vx: e.vx, vy: e.vy });
+      }
     }
-    expect(moved).toBeGreaterThanOrEqual(Math.floor(start.size * 0.5));
+    expect(prev.size).toBeGreaterThan(0);
+
+    // Next ~5 ticks (250ms) should keep the same velocity for most AI still moving
+    // Hold min is 350ms so first 250ms after lock must not flip for normal goals
+    let sameDirTicks = 0;
+    let totalChecks = 0;
+    for (let i = 0; i < 5; i++) {
+      state = stepAiCrowd(state, 50, i + 2);
+      state = { ...state, tick: state.tick + 1 };
+      for (const e of Object.values(state.entities)) {
+        if (e.kind !== 'ai' || !e.alive) continue;
+        const p = prev.get(e.id);
+        if (!p || Math.hypot(e.vx, e.vy) < 1) continue;
+        totalChecks += 1;
+        if (Math.abs(e.vx - p.vx) < 0.5 && Math.abs(e.vy - p.vy) < 0.5) {
+          sameDirTicks += 1;
+        }
+      }
+    }
+    expect(totalChecks).toBeGreaterThan(0);
+    // Vast majority keep lock (allow a few waypoint-arrivals to drop)
+    expect(sameDirTicks / totalChecks).toBeGreaterThan(0.85);
   });
 });

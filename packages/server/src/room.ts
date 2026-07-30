@@ -1,6 +1,7 @@
 import {
   SEEKER_SPEED,
   RABBIT_SPEED,
+  applyMissionAction,
   attemptCatch,
   canSeekerAct,
   createLobby,
@@ -164,7 +165,21 @@ export class Room {
       return;
     }
 
+    if (intent.type === 'mission_action') {
+      this.state = applyMissionAction(this.state, playerId);
+      this.broadcastSnapshot();
+      return;
+    }
+
     if (intent.type === 'catch') {
+      if (
+        this.state.seekerId !== playerId &&
+        this.state.mission?.kind === 'touch_fox'
+      ) {
+        this.state = applyMissionAction(this.state, playerId);
+        this.broadcastSnapshot();
+        return;
+      }
       if (!canSeekerAct(this.state, playerId)) return;
       const targetId = nearestCatchTarget(this.state, playerId);
       if (!targetId) {

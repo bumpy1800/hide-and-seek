@@ -81,6 +81,19 @@ export type CaughtHuman = {
   name: string;
 };
 
+/** Shared sudden mission for all rabbits (fox can observe). */
+export type MissionKind = 'touch_fox' | 'visit_point';
+
+export type ActiveMission = {
+  kind: MissionKind;
+  remainingMs: number;
+  /** Map point for visit_point (ignored for touch_fox display of coords optional). */
+  targetX: number;
+  targetY: number;
+  /** Rabbit entity ids that completed this mission. */
+  completedIds: string[];
+};
+
 export type MatchState = {
   roomId: string;
   phase: MatchPhase;
@@ -113,11 +126,24 @@ export type MatchState = {
    * All clients share this via snapshots.
    */
   meadowSeed: number;
+  /** Active sudden mission, or null when none. */
+  mission: ActiveMission | null;
+  /**
+   * Mission schedule:
+   * - `-1` = not armed (waiting for hunt timer / post-prep)
+   * - `null` = no further missions this match
+   * - `>= 0` = ms until next grant
+   */
+  missionNextMs: number | null;
+  /** How many sudden missions have been granted this match (0 = first still pending). */
+  missionGrantCount: number;
 };
 
 export type ClientIntent =
   | { type: 'move'; dx: number; dy: number }
   | { type: 'catch' }
+  /** Rabbit Space: complete touch_fox if in range of seeker. */
+  | { type: 'mission_action' }
   | { type: 'ready' }
   | {
       type: 'start';

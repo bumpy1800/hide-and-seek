@@ -1,4 +1,5 @@
 import {
+  applyMissionAction,
   integrateMotion,
   joinHuman,
   createLobby,
@@ -83,7 +84,22 @@ export class LocalPracticeHost {
       return;
     }
 
+    if (intent.type === 'mission_action') {
+      this.state = applyMissionAction(this.state, this.playerId);
+      this.emitSnapshot();
+      return;
+    }
+
     if (intent.type === 'catch') {
+      // Rabbit practice: Space completes touch_fox mission
+      if (
+        this.state.practiceRole === 'rabbit' &&
+        this.state.mission?.kind === 'touch_fox'
+      ) {
+        this.state = applyMissionAction(this.state, this.playerId);
+        this.emitSnapshot();
+        return;
+      }
       if (this.state.practiceRole !== 'fox' || this.state.seekerId !== this.playerId) return;
       const targetId = nearestCatchTarget(this.state, this.playerId);
       if (!targetId) return;

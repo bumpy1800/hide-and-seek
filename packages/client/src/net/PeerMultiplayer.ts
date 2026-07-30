@@ -3,6 +3,7 @@ import {
   PLAYER_SPEED,
   RABBIT_SPEED,
   SEEKER_SPEED,
+  applyMissionAction,
   attemptCatch,
   applyRoomSettings,
   createLobby,
@@ -350,8 +351,23 @@ export class PeerMultiplayer {
       return;
     }
 
+    if (intent.type === 'mission_action') {
+      this.state = applyMissionAction(this.state, playerId);
+      this.broadcastSnapshot();
+      return;
+    }
+
     if (intent.type === 'catch') {
       if (isSeekerPrepActive(this.state)) return;
+      // Rabbit Space during touch_fox mission → mission action (not catch)
+      if (
+        this.state.seekerId !== playerId &&
+        this.state.mission?.kind === 'touch_fox'
+      ) {
+        this.state = applyMissionAction(this.state, playerId);
+        this.broadcastSnapshot();
+        return;
+      }
       const targetId = nearestCatchTarget(this.state, playerId);
       if (!targetId) {
         this.emitTo(playerId, { type: 'event', event: 'catch_miss', detail: { reason: 'no_target' } });

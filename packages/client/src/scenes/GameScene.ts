@@ -25,6 +25,8 @@ import {
   startCountdownSeconds,
   FOX_ROULETTE_MS,
   START_SEQUENCE_MS,
+  missionHudLines,
+  MISSION_VISIT_RADIUS,
   type Facing,
   type CatchVictimKind,
   type RoomSettings,
@@ -102,6 +104,9 @@ export class GameScene extends Phaser.Scene {
   private rouletteNames: Array<{ id: string; name: string }> = [];
   private rouletteCursor = 0;
   private lastRouletteSwap = 0;
+  /** Visit-point mission marker (world). */
+  private missionMarker: Phaser.GameObjects.Arc | null = null;
+  private missionMarkerLabel: Phaser.GameObjects.Text | null = null;
 
   constructor() {
     super('Game');
@@ -357,6 +362,40 @@ export class GameScene extends Phaser.Scene {
     for (const g of this.graves) g.destroy();
     this.graves = [];
     this.graveIds.clear();
+  }
+
+  private syncMissionMarker(state: MatchState): void {
+    const m = state.mission;
+    const show =
+      state.phase === 'playing' &&
+      (state.mode === 'normal' || state.mode === 'practice') &&
+      m != null &&
+      m.kind === 'visit_point';
+    if (!show) {
+      this.missionMarker?.setVisible(false);
+      this.missionMarkerLabel?.setVisible(false);
+      return;
+    }
+    if (!this.missionMarker) {
+      this.missionMarker = this.add
+        .circle(m!.targetX, m!.targetY, MISSION_VISIT_RADIUS, 0xffe08a, 0.22)
+        .setStrokeStyle(3, 0xffc107, 0.95)
+        .setDepth(6);
+      this.missionMarkerLabel = this.add
+        .text(m!.targetX, m!.targetY - MISSION_VISIT_RADIUS - 12, '미션 지점', {
+          fontSize: '14px',
+          color: '#fff8e7',
+          fontStyle: 'bold',
+          backgroundColor: '#00000099',
+          padding: { x: 6, y: 3 },
+        })
+        .setOrigin(0.5)
+        .setDepth(7);
+    }
+    this.missionMarker.setPosition(m!.targetX, m!.targetY).setVisible(true);
+    this.missionMarkerLabel
+      ?.setPosition(m!.targetX, m!.targetY - MISSION_VISIT_RADIUS - 12)
+      .setVisible(true);
   }
 
   /**
@@ -814,6 +853,21 @@ export class GameScene extends Phaser.Scene {
           this.lastMoveSent = { dx: intent.dx, dy: intent.dy };
           this.sendIntent(intent);
         }
+      } else if (intent.type === 'catch') {
+        // Role-split Space: fox catches; rabbit uses mission_action for touch_fox
+        const isFox =
+          you != null &&
+          (this.state.seekerId === you || this.state.practiceRole === 'fox');
+        if (
+          !isFox &&
+          this.state.mission?.kind === 'touch_fox' &&
+          you &&
+          this.state.entities[you]?.alive
+        ) {
+          this.sendIntent({ type: 'mission_action' });
+        } else if (isFox) {
+          this.sendIntent(intent);
+        }
       } else {
         this.sendIntent(intent);
       }
@@ -1065,6 +1119,11 @@ export class GameScene extends Phaser.Scene {
       for (const line of roleObjectiveLines(state, you)) {
         rows.push(line);
       }
+      if (state.phase === 'playing') {
+        for (const line of missionHudLines(state, you)) {
+          rows.push(line);
+        }
+      }
     } else {
       const myRole =
         foxKnown && state.seekerId === you
@@ -1089,8 +1148,13 @@ export class GameScene extends Phaser.Scene {
         if (!prepActive && state.seekerId === you) {
           rows.push(`조작  범위 ${state.config.catchRange}px 에서 잡기`);
         }
+        for (const line of missionHudLines(state, you)) {
+          rows.push(line);
+        }
       }
     }
+
+    this.syncMissionMarker(state);
 
     if (state.phase === 'lobby') {
       if (this.peer && this.peerRole === 'host') {
@@ -1147,9 +1211,14 @@ export class GameScene extends Phaser.Scene {
 
     const showCatch =
       state.phase === 'playing' &&
-      state.seekerId === you &&
       !this.seekerIsBlind(state, you) &&
-      (state.mode === 'normal' || state.practiceRole === 'fox');
+      ((state.seekerId === you &&
+        (state.mode === 'normal' || state.practiceRole === 'fox')) ||
+        // Rabbit mobile button doubles as mission touch during touch_fox
+        (state.seekerId !== you &&
+          state.mission?.kind === 'touch_fox' &&
+          state.entities[you]?.alive === true &&
+          (state.mode === 'normal' || state.mode === 'practice')));
     this.inputCtl.setCatchVisible(showCatch);
 
     const showStart =

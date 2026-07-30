@@ -20,6 +20,12 @@ import {
 } from './types.js';
 import { createRng, pickRandom } from './rng.js';
 import { DEFAULT_MEADOW_SEED, newRoomMeadowSeed } from './meadowLayout.js';
+import {
+  attemptMissionTouch,
+  checkMissionProximityCompletions,
+  emptyMissionState,
+  tickMission,
+} from './mission.js';
 
 export function defaultConfig(overrides: Partial<MatchConfig> = {}): MatchConfig {
   return {
@@ -67,6 +73,7 @@ export function createLobby(
     tick: 0,
     caughtHumans: [],
     meadowSeed: seed,
+    ...emptyMissionState(),
   };
 }
 
@@ -184,6 +191,7 @@ export function returnToLobby(state: MatchState): MatchState {
     tick: 0,
     caughtHumans: [],
     meadowSeed: state.meadowSeed ?? DEFAULT_MEADOW_SEED,
+    ...emptyMissionState(),
   };
 }
 
@@ -400,6 +408,10 @@ export function startMatch(state: MatchState, seedOrOpts: number | StartOptions 
     tick: 0,
     caughtHumans: [],
     meadowSeed,
+    // Arm missions after prep ends (hunt timer starts)
+    mission: null,
+    missionNextMs: -1,
+    missionGrantCount: 0,
   };
 }
 
@@ -481,6 +493,10 @@ export function startPracticeMatch(
     endReason: null,
     tick: 0,
     caughtHumans: [],
+    // Practice: arm sudden missions (same 10s → 30s → cooldown loop for testing)
+    mission: null,
+    missionNextMs: -1,
+    missionGrantCount: 0,
   };
 }
 
@@ -635,7 +651,23 @@ export function skipToPlaying(state: MatchState): MatchState {
     phase: 'playing',
     startSequenceRemainingMs: 0,
     seekerPrepRemainingMs: 0,
+    // Ready for mission arming on next hunt tick (or keep existing)
+    missionNextMs:
+      state.mode === 'normal'
+        ? state.missionNextMs === null
+          ? null
+          : state.missionNextMs === undefined || state.missionNextMs === -1
+            ? -1
+            : state.missionNextMs
+        : null,
+    mission: state.mission ?? null,
+    missionGrantCount: state.missionGrantCount ?? 0,
   };
+}
+
+/** Rabbit Space / mission_action while playing. */
+export function applyMissionAction(state: MatchState, playerId: string): MatchState {
+  return attemptMissionTouch(state, playerId);
 }
 
 /** Short global toast line for a successful catch (all clients). */
@@ -774,21 +806,26 @@ export function tickTimer(state: MatchState, dtMs: number): MatchState {
   if (state.phase !== 'playing') return state;
 
   // Prep countdown: AI may still move; main hunt timer waits until prep ends.
+  // Missions do NOT run during seeker prep (10s delay starts after prep).
   const prepLeft = seekerPrepRemainingMs(state);
   if (state.mode === 'normal' && prepLeft > 0) {
     return {
       ...state,
       seekerPrepRemainingMs: Math.max(0, prepLeft - dtMs),
       tick: state.tick + 1,
+      missionNextMs: state.missionNextMs ?? -1,
     };
   }
 
-  // Practice: no timed win/lose — just tick for AI stepping
+  // Practice: no timed win/lose — AI + mission loop for testing
   if (state.mode === 'practice') {
     if (state.humans.length === 0) {
       return createLobby(state.roomId, state.config);
     }
     let next = { ...state, tick: state.tick + 1 };
+    // Same mission schedule as multi (10s first, 30s duration, 30s cooldown loop)
+    next = tickMission(next, dtMs);
+    next = checkMissionProximityCompletions(next);
     // Fox practice: if all AI rabbits are down, spawn a fresh pack
     if (next.practiceRole === 'fox') {
       const aliveAi = Object.values(next.entities).filter((e) => e.kind === 'ai' && e.alive);
@@ -807,7 +844,15 @@ export function tickTimer(state: MatchState, dtMs: number): MatchState {
   }
 
   const timeRemainingMs = Math.max(0, state.timeRemainingMs - dtMs);
-  return evaluateEndConditions({ ...state, timeRemainingMs, tick: state.tick + 1 });
+  let next: MatchState = {
+    ...state,
+    timeRemainingMs,
+    tick: state.tick + 1,
+  };
+  // Hunt clock running → sudden missions (10s first delay, 30s each, loop rules)
+  next = tickMission(next, dtMs);
+  next = checkMissionProximityCompletions(next);
+  return evaluateEndConditions(next);
 }
 
 export function setEntityVelocity(
@@ -847,12 +892,17 @@ export function integrateMotion(state: MatchState, dtSec: number): MatchState {
       entities[id] = { ...e, vx: 0, vy: 0 };
       continue;
     }
-    // Original movement: map bounds only (props are visual cover, not blockers)
+    // Map bounds only (props are visual cover, not blockers)
     const x = clamp(e.x + e.vx * dtSec, 16, mapW - 16);
     const y = clamp(e.y + e.vy * dtSec, 16, mapH - 16);
     entities[id] = { ...e, x, y };
   }
-  return { ...state, entities };
+  let next: MatchState = { ...state, entities };
+  // Visit-point missions complete on movement
+  if (next.mission?.kind === 'visit_point') {
+    next = checkMissionProximityCompletions(next);
+  }
+  return next;
 }
 
 export function livingHumanHiders(state: MatchState): EntityState[] {
