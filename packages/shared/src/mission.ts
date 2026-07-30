@@ -41,29 +41,35 @@ export function missionKindLabel(kind: MissionKind): string {
     : '30초 안에 목표 지점을 지나가세요';
 }
 
+/** Top-center banner title (shared fox + rabbits). */
+export const MISSION_BANNER_TITLE = '돌발 미션 발생!! 토끼들은 미션을 수행해주세요';
+
+/** Top-center banner lines for active mission (pure helper for tests + UI). */
+export function missionBannerLines(state: MatchState): string[] | null {
+  const m = state.mission;
+  if (!m || state.phase !== 'playing') return null;
+  if (state.mode !== 'normal' && state.mode !== 'practice') return null;
+  const sec = Math.max(0, Math.ceil(m.remainingMs / 1000));
+  return [
+    MISSION_BANNER_TITLE,
+    `현재 미션: ${missionKindLabel(m.kind)} (${sec}초)`,
+  ];
+}
+
 export function missionHudLines(state: MatchState, you: string): string[] {
   const m = state.mission;
   if (!m || state.phase !== 'playing') return [];
   if (state.mode !== 'normal' && state.mode !== 'practice') return [];
-  const sec = Math.max(0, Math.ceil(m.remainingMs / 1000));
+  // Compact left-HUD complement; primary alert is top-center banner
   const isFox = state.seekerId === you || state.practiceRole === 'fox';
-  const lines = [
-    isFox ? `돌발 미션(토끼)  ${sec}초` : `돌발 미션  ${sec}초`,
-    `내용  ${missionKindLabel(m.kind)}`,
-  ];
-  if (state.mode === 'practice') {
-    lines.push('안내  연습 · 미션 테스트 중');
-  }
-  if (m.kind === 'visit_point') {
-    lines.push(`목표  (${Math.round(m.targetX)}, ${Math.round(m.targetY)})`);
-  }
+  const lines: string[] = [];
   if (!isFox) {
     const done = m.completedIds.includes(you);
-    lines.push(done ? '상태  완료' : '상태  진행 중 · 실패 시 즉사');
+    lines.push(done ? '미션  완료' : '미션  진행 중 · 실패 시 즉사');
   } else {
     const rabbits = rabbitIds(state);
     const done = rabbits.filter((id) => m.completedIds.includes(id)).length;
-    lines.push(`완료  ${done}/${rabbits.length} 토끼`);
+    lines.push(`미션 완료  ${done}/${rabbits.length}`);
   }
   return lines;
 }

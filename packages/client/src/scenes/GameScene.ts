@@ -26,6 +26,7 @@ import {
   FOX_ROULETTE_MS,
   START_SEQUENCE_MS,
   missionHudLines,
+  missionBannerLines,
   MISSION_VISIT_RADIUS,
   type Facing,
   type CatchVictimKind,
@@ -107,6 +108,8 @@ export class GameScene extends Phaser.Scene {
   /** Visit-point mission marker (world). */
   private missionMarker: Phaser.GameObjects.Arc | null = null;
   private missionMarkerLabel: Phaser.GameObjects.Text | null = null;
+  /** Top-center sudden-mission banner (fox + rabbits). */
+  private missionBanner!: Phaser.GameObjects.Text;
 
   constructor() {
     super('Game');
@@ -194,6 +197,24 @@ export class GameScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(2000)
       .setShadow(0, 1, '#00000066', 2, false, true);
+
+    // Sudden mission — top center (highly visible to fox and rabbits)
+    this.missionBanner = this.add
+      .text(width / 2, 56, '', {
+        fontFamily: hudFont,
+        fontSize: '22px',
+        color: '#ffe08a',
+        fontStyle: 'bold',
+        align: 'center',
+        backgroundColor: '#7a1f1fcc',
+        padding: { x: 18, y: 12 },
+        lineSpacing: 8,
+      })
+      .setOrigin(0.5, 0)
+      .setScrollFactor(0)
+      .setDepth(2500)
+      .setVisible(false)
+      .setShadow(0, 2, '#000000aa', 4, false, true);
 
     // Seeker prep blackout — obscures world so rabbit motion is not visible
     this.prepOverlay = this.add
@@ -396,6 +417,18 @@ export class GameScene extends Phaser.Scene {
     this.missionMarkerLabel
       ?.setPosition(m!.targetX, m!.targetY - MISSION_VISIT_RADIUS - 12)
       .setVisible(true);
+  }
+
+  private syncMissionBanner(state: MatchState): void {
+    const lines = missionBannerLines(state);
+    if (!lines) {
+      this.missionBanner.setVisible(false);
+      return;
+    }
+    this.missionBanner.setText(lines.join('\n'));
+    this.missionBanner.setVisible(true);
+    // Keep centered if scale changed
+    this.missionBanner.setPosition(this.scale.width / 2, 56);
   }
 
   /**
@@ -1155,6 +1188,7 @@ export class GameScene extends Phaser.Scene {
     }
 
     this.syncMissionMarker(state);
+    this.syncMissionBanner(state);
 
     if (state.phase === 'lobby') {
       if (this.peer && this.peerRole === 'host') {
