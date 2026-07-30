@@ -9,13 +9,11 @@ import {
   joinHuman,
   listMeadowDecor,
   resolveSolidCollisions,
-  setEntityVelocity,
   solidRadiusFor,
   startMatch,
-  skipToPlaying,
 } from '../src/index.js';
 
-describe('meadow solid obstacles (tree/rock)', () => {
+describe('meadow solid obstacles (tree/rock) — visual layout helpers', () => {
   it('builds solids only for tree and rock (not bush)', () => {
     const solids = getSolidObstacles(DEFAULT_MEADOW_SEED);
     expect(solids.length).toBeGreaterThan(5);
@@ -39,10 +37,9 @@ describe('meadow solid obstacles (tree/rock)', () => {
     }
   });
 
-  it('resolveSolidCollisions pushes a point outside a rock/tree circle', () => {
+  it('resolveSolidCollisions helper still pushes out of a circle (for optional use)', () => {
     const solids = getSolidObstacles(DEFAULT_MEADOW_SEED);
     const rock = solids.find((s) => s.kind === 'rock') ?? solids[0]!;
-    // Place entity at obstacle center — must be pushed out
     const out = resolveSolidCollisions(
       rock.x,
       rock.y,
@@ -53,7 +50,7 @@ describe('meadow solid obstacles (tree/rock)', () => {
     expect(d).toBeGreaterThanOrEqual(rock.radius + ENTITY_COLLIDE_RADIUS - 0.5);
   });
 
-  it('integrateMotion cannot walk through a solid obstacle', () => {
+  it('integrateMotion uses original free movement (walk through props)', () => {
     let lobby = createLobby('obs', defaultConfig({ aiCount: 0, seekerPrepMs: 0 }));
     let res = joinHuman(lobby, 'a', 'A', { x: 100, y: 100 });
     res = joinHuman(res.ok ? res.state : lobby, 'b', 'B', { x: 200, y: 200 });
@@ -63,7 +60,7 @@ describe('meadow solid obstacles (tree/rock)', () => {
     const solids = getSolidObstacles(state.meadowSeed);
     const target = solids[0]!;
     const moverId = state.humans.find((h) => h !== state.seekerId) ?? state.humans[0]!;
-    const approachX = target.x - (target.radius + ENTITY_COLLIDE_RADIUS + 8);
+    const startX = target.x - 40;
     state = {
       ...state,
       seekerPrepRemainingMs: 0,
@@ -73,7 +70,7 @@ describe('meadow solid obstacles (tree/rock)', () => {
         ...state.entities,
         [moverId]: {
           ...state.entities[moverId]!,
-          x: approachX,
+          x: startX,
           y: target.y,
           vx: 400,
           vy: 0,
@@ -84,8 +81,7 @@ describe('meadow solid obstacles (tree/rock)', () => {
       state = integrateMotion(state, 0.05);
     }
     const e = state.entities[moverId]!;
-    const d = Math.hypot(e.x - target.x, e.y - target.y);
-    expect(d).toBeGreaterThanOrEqual(target.radius + ENTITY_COLLIDE_RADIUS - 1);
+    // Original behavior: props do not block movement
+    expect(e.x).toBeGreaterThan(target.x);
   });
 });
-

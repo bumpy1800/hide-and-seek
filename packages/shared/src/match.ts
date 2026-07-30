@@ -19,27 +19,7 @@ import {
   type Winner,
 } from './types.js';
 import { createRng, pickRandom } from './rng.js';
-import {
-  DEFAULT_MEADOW_SEED,
-  ENTITY_COLLIDE_RADIUS,
-  getSolidObstacles,
-  newRoomMeadowSeed,
-  resolveSolidCollisions,
-  type SolidObstacle,
-} from './meadowLayout.js';
-
-/** Cache solids per meadow seed (integrateMotion is hot). */
-const solidsBySeed = new Map<number, SolidObstacle[]>();
-
-export function solidsForMeadowSeed(seed: number = DEFAULT_MEADOW_SEED): SolidObstacle[] {
-  const key = seed >>> 0;
-  let solids = solidsBySeed.get(key);
-  if (!solids) {
-    solids = getSolidObstacles(key);
-    solidsBySeed.set(key, solids);
-  }
-  return solids;
-}
+import { DEFAULT_MEADOW_SEED, newRoomMeadowSeed } from './meadowLayout.js';
 
 export function defaultConfig(overrides: Partial<MatchConfig> = {}): MatchConfig {
   return {
@@ -867,13 +847,9 @@ export function integrateMotion(state: MatchState, dtSec: number): MatchState {
       entities[id] = { ...e, vx: 0, vy: 0 };
       continue;
     }
-    let x = e.x + e.vx * dtSec;
-    let y = e.y + e.vy * dtSec;
-    // Tree/rock solid circles (bushes remain walkable cover)
-    const solids = solidsForMeadowSeed(state.meadowSeed ?? DEFAULT_MEADOW_SEED);
-    const hit = resolveSolidCollisions(x, y, ENTITY_COLLIDE_RADIUS, solids);
-    x = clamp(hit.x, 16, mapW - 16);
-    y = clamp(hit.y, 16, mapH - 16);
+    // Original movement: map bounds only (props are visual cover, not blockers)
+    const x = clamp(e.x + e.vx * dtSec, 16, mapW - 16);
+    const y = clamp(e.y + e.vy * dtSec, 16, mapH - 16);
     entities[id] = { ...e, x, y };
   }
   return { ...state, entities };
