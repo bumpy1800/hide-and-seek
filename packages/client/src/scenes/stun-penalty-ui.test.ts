@@ -57,8 +57,17 @@ describe('Stun penalty mode UI wiring in client', () => {
   it('MenuScene: supports stun penalty mode toggle and practice button', () => {
     const src = readFileSync(resolve(__dirname, 'MenuScene.ts'), 'utf8');
     expect(src).toMatch(/stun_penalty/);
+    expect(src).toMatch(/연습 · 여우/);
     expect(src).toMatch(/연습 · 무제한 스턴/);
     expect(src).toMatch(/무제한 스턴/);
     expect(src).toMatch(/무제한 \(∞\)/);
+  });
+
+  it('GameScene and LocalPracticeHost default practice fox to stun_penalty mode', () => {
+    const gameSrc = readFileSync(resolve(__dirname, 'GameScene.ts'), 'utf8');
+    expect(gameSrc).toMatch(/this\.roomSettings\?\.ruleMode \?\? 'stun_penalty'/);
+
+    const hostSrc = readFileSync(resolve(__dirname, '../net/LocalPracticeHost.ts'), 'utf8');
+    expect(hostSrc).toMatch(/private ruleMode: RoomRuleMode = 'stun_penalty'/);
   });
 });

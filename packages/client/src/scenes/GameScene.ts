@@ -840,7 +840,7 @@ export class GameScene extends Phaser.Scene {
     this.localPractice = new LocalPracticeHost(
       this.practiceRole,
       this.playerName,
-      this.roomSettings?.ruleMode ?? 'standard',
+      this.roomSettings?.ruleMode ?? 'stun_penalty',
     );
     this.localPractice.onMessage = (msg) => {
       if (msg.type === 'welcome') {

@@ -29,7 +29,7 @@ export class LocalPracticeHost {
   constructor(
     private practiceRole: PracticeRole,
     private playerName = '나',
-    private ruleMode: RoomRuleMode = 'standard',
+    private ruleMode: RoomRuleMode = 'stun_penalty',
   ) {
     this.state = createLobby(`local-practice-${practiceRole}`, defaultConfig({ ruleMode }));
   }
@@ -57,6 +57,7 @@ export class LocalPracticeHost {
         seekerId: this.state.seekerId,
         mode: this.state.mode,
         practiceRole: this.state.practiceRole,
+        ruleMode: this.state.ruleMode,
       },
     });
     this.emitSnapshot();

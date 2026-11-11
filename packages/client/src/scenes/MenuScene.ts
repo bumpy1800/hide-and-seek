@@ -171,7 +171,13 @@ export class MenuScene extends Phaser.Scene {
       this.go('practice', 'rabbit'),
     );
     this.makeButton(width * 0.48, pracY, 200, 48, 0xe67e22, '연습 · 여우', () =>
-      this.go('practice', 'fox'),
+      this.go('practice', 'fox', undefined, undefined, {
+        catchBudget: 999,
+        timeLimitMs: 90_000,
+        aiCount: 18,
+        foxMode: 'roulette',
+        ruleMode: 'stun_penalty',
+      }),
     );
     this.makeButton(width * 0.78, pracY, 240, 48, 0x8e44ad, '연습 · 무제한 스턴', () =>
       this.go('practice', 'fox', undefined, undefined, {
