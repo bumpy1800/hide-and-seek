@@ -1,20 +1,15 @@
 import {
-  applyMissionAction,
-  integrateMotion,
-  joinHuman,
+  applyPlayingIntent,
   createLobby,
   defaultConfig,
+  joinHuman,
   startMatch,
-  stepAiCrowd,
-  tickTimer,
-  attemptCatch,
-  nearestCatchTarget,
-  setEntityVelocity,
-  RABBIT_SPEED,
-  SEEKER_SPEED,
+  tickAuthority,
   type ClientIntent,
+  type HostSimEvent,
   type MatchState,
   type PracticeRole,
+  type RoomRuleMode,
   type ServerMessage,
 } from '@hide-and-seek/shared';
 
@@ -22,7 +17,7 @@ export type LocalHostHandler = (msg: ServerMessage) => void;
 
 /**
  * Client-side practice host — no WebSocket.
- * Solo practice always works even when multiplayer server is down.
+ * Authority logic lives in shared hostSim.
  */
 export class LocalPracticeHost {
   private state: MatchState;
@@ -34,12 +29,12 @@ export class LocalPracticeHost {
   constructor(
     private practiceRole: PracticeRole,
     private playerName = '나',
+    private ruleMode: RoomRuleMode = 'standard',
   ) {
-    this.state = createLobby(`local-practice-${practiceRole}`, defaultConfig());
+    this.state = createLobby(`local-practice-${practiceRole}`, defaultConfig({ ruleMode }));
   }
 
   start(): void {
-    // Join as single human with chosen nickname
     const joined = joinHuman(this.state, this.playerId, this.playerName);
     if (!joined.ok) {
       this.emit({ type: 'error', message: joined.reason });
@@ -49,11 +44,11 @@ export class LocalPracticeHost {
     this.emit({ type: 'welcome', playerId: this.playerId, roomId: this.state.roomId });
     this.emitSnapshot();
 
-    // Immediately start practice (solo)
     this.state = startMatch(this.state, {
       mode: 'practice',
       practiceRole: this.practiceRole,
       seed: Date.now(),
+      ruleMode: this.ruleMode,
     });
     this.emit({
       type: 'event',
@@ -71,77 +66,25 @@ export class LocalPracticeHost {
 
   sendIntent(intent: ClientIntent): void {
     if (this.state.phase !== 'playing') return;
+    const result = applyPlayingIntent(this.state, this.playerId, intent);
+    this.state = result.state;
+    this.dispatchEvents(result.events);
+  }
 
-    if (intent.type === 'move') {
-      const len = Math.hypot(intent.dx, intent.dy) || 1;
-      const nx = intent.dx / len;
-      const ny = intent.dy / len;
-      const isSeeker = this.state.seekerId === this.playerId;
-      const speed = isSeeker ? SEEKER_SPEED : RABBIT_SPEED;
-      const vx = intent.dx === 0 && intent.dy === 0 ? 0 : nx * speed;
-      const vy = intent.dx === 0 && intent.dy === 0 ? 0 : ny * speed;
-      this.state = setEntityVelocity(this.state, this.playerId, vx, vy);
-      return;
-    }
-
-    if (intent.type === 'mission_action') {
-      this.state = applyMissionAction(this.state, this.playerId);
-      this.emitSnapshot();
-      return;
-    }
-
-    if (intent.type === 'catch') {
-      // Rabbit practice: Space completes touch_fox mission
-      if (
-        this.state.practiceRole === 'rabbit' &&
-        this.state.mission?.kind === 'touch_fox'
-      ) {
-        this.state = applyMissionAction(this.state, this.playerId);
+  private dispatchEvents(events: HostSimEvent[]): void {
+    for (const ev of events) {
+      if (ev.kind === 'snapshot') {
         this.emitSnapshot();
-        return;
+      } else {
+        // Practice: only local player — unicast and broadcast are the same
+        this.emit({ type: 'event', event: ev.event, detail: ev.detail });
       }
-      if (this.state.practiceRole !== 'fox' || this.state.seekerId !== this.playerId) return;
-      const targetId = nearestCatchTarget(this.state, this.playerId);
-      if (!targetId) return;
-      const result = attemptCatch(this.state, this.playerId, targetId);
-      this.state = result.state;
-      this.emit({
-        type: 'event',
-        event: result.ok ? 'catch_success' : 'catch_fail',
-        detail: result.ok
-          ? {
-              ok: true,
-              kind: result.kind,
-              name: result.name,
-              x: result.x,
-              y: result.y,
-              caughtId: result.caughtId,
-              placeGrave: result.placeGrave,
-            }
-          : result,
-      });
-      this.emitSnapshot();
     }
   }
 
   private tick(): void {
-    if (this.state.phase !== 'playing') return;
-    // Safety: practice must never end via hunt rules
-    if (this.state.mode !== 'practice') {
-      this.state = { ...this.state, mode: 'practice', practiceRole: this.practiceRole };
-    }
-    this.state = stepAiCrowd(this.state, this.tickMs, this.state.tick + 1);
-    this.state = integrateMotion(this.state, this.tickMs / 1000);
-    this.state = tickTimer(this.state, this.tickMs);
-    // Force-keep playing for practice
-    if (this.state.phase === 'ended' && this.state.mode === 'practice') {
-      this.state = {
-        ...this.state,
-        phase: 'playing',
-        winner: null,
-        endReason: null,
-      };
-    }
+    if (this.state.phase !== 'playing' && this.state.phase !== 'starting') return;
+    this.state = tickAuthority(this.state, this.tickMs);
     this.emitSnapshot();
   }
 

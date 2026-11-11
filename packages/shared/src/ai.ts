@@ -13,7 +13,7 @@ export type AiVisitPattern =
 /** One-way visit approach stages (never thrash offset↔point). */
 export type AiVisitPhase = 'offset' | 'point' | 'after';
 
-type AiBrain = {
+export type AiBrain = {
   targetX: number;
   targetY: number;
   idleMs: number;
@@ -38,11 +38,46 @@ type AiBrain = {
   /** Cached offset approach waypoint for sweep_by. */
   offsetX: number;
   offsetY: number;
+  /**
+   * Point past the mission marker — approach always aims here so the path
+   * crosses the visit radius (never aims at exact marker coords).
+   */
+  approachX: number;
+  approachY: number;
+  /** Last position for stuck / thrash detection. */
+  lastX: number;
+  lastY: number;
+  /** Ms spent barely moving while supposed to be walking. */
+  stuckMs: number;
+  /** True after we observed real displacement (integrateMotion running). */
+  sawMotion: boolean;
+  /**
+   * While > 0, keep dirNx/dirNy locked (no preferred flip).
+   * Used near goals so 8-dir does not L↔R thrash every frame.
+   */
+  escapeHoldMs: number;
+  /**
+   * Cached touch_fox surround intercept. Recomputed only when refresh
+   * timer elapses or the goal is reached — avoids thrash when fox velocity
+   * changes every host tick.
+   */
+  surroundGoalX: number;
+  surroundGoalY: number;
+  surroundRefreshMs: number;
 };
 
 /** Min/max hold when locking a direction (keyboard-like). */
 export const AI_DIR_HOLD_MS_MIN = 400;
 export const AI_DIR_HOLD_MS_MAX = 850;
+/** Near a goal, re-snap direction often so 8-dir does not thrash left↔right. */
+export const AI_DIR_HOLD_MS_NEAR = 120;
+/** Distance under which we always re-lock preferred 8-dir. */
+export const AI_NEAR_GOAL_DIST = 72;
+/** Distance under which we treat the waypoint as arrived. */
+export const AI_ARRIVAL_DIST = 18;
+/** If moved less than this over AI_STUCK_MS while walking, force replan. */
+export const AI_STUCK_MOVE_EPS = 3;
+export const AI_STUCK_MS = 450;
 
 /** Stagger window so AI don't all bolt on the same tick. */
 export const AI_MISSION_STAGGER_MS_MAX = 4500;
@@ -170,6 +205,16 @@ function emptyBrain(targetX: number, targetY: number, idleMs: number): AiBrain {
     visitPhase: 'point',
     offsetX: targetX,
     offsetY: targetY,
+    approachX: targetX,
+    approachY: targetY,
+    surroundGoalX: targetX,
+    surroundGoalY: targetY,
+    surroundRefreshMs: 0,
+    lastX: targetX,
+    lastY: targetY,
+    stuckMs: 0,
+    sawMotion: false,
+    escapeHoldMs: 0,
   };
 }
 
@@ -182,18 +227,43 @@ function dirsEqual(
   return Math.abs(a.nx - bx) < eps && Math.abs(a.ny - by) < eps;
 }
 
+/**
+ * When to abandon the held 8-dir for a new preferred dir.
+ * Close to the goal we always re-lock — long holds near a point cause L↔R thrash.
+ */
 export function shouldRelockDir(
   brain: AiBrain,
   preferred: { nx: number; ny: number },
   dx: number,
   dy: number,
+  dist = Math.hypot(dx, dy),
 ): boolean {
   if (brain.dirHoldMs <= 0) return true;
   if (brain.dirNx === 0 && brain.dirNy === 0) return true;
   if (dirsEqual(preferred, brain.dirNx, brain.dirNy)) return false;
+  // Near goal: snap as soon as preferred 8-dir changes (don't hold 400ms past a point)
+  if (dist < AI_NEAR_GOAL_DIST) return true;
+  // Far: only reverse if we are clearly walking away from the goal
   const progress = brain.dirNx * dx + brain.dirNy * dy;
-  if (progress < -8) return true;
+  const reverseThresh = -Math.max(24, dist * 0.35);
+  if (progress < reverseThresh) return true;
   return false;
+}
+
+/** Pick a far map point distinctly away from (x,y). */
+function farAwayFrom(
+  rng: () => number,
+  x: number,
+  y: number,
+  mapW: number,
+  mapH: number,
+  minDist = 180,
+): { x: number; y: number } {
+  for (let i = 0; i < 8; i++) {
+    const p = randomMapPoint(rng, mapW, mapH);
+    if (Math.hypot(p.x - x, p.y - y) >= minDist) return p;
+  }
+  return randomMapPoint(rng, mapW, mapH);
 }
 
 function missionKeyOf(state: MatchState): string | null {
@@ -258,6 +328,146 @@ function approachOffset(
   return { x: tx + Math.cos(a) * r, y: ty + Math.sin(a) * r };
 }
 
+function clampMap(
+  x: number,
+  y: number,
+  mapW: number,
+  mapH: number,
+  pad = 40,
+): { x: number; y: number } {
+  return {
+    x: Math.max(pad, Math.min(mapW - pad, x)),
+    y: Math.max(pad, Math.min(mapH - pad, y)),
+  };
+}
+
+/** Stronger mix so similar ids (ai-0..ai-n) land in different surround slots. */
+function surroundSlot(id: string, grantCount: number, nSlots: number): number {
+  let h = 0x811c9dc5 ^ (grantCount * 0x9e3779b9);
+  for (let i = 0; i < id.length; i++) {
+    h = Math.imul(h ^ id.charCodeAt(i), 0x01000193);
+  }
+  h ^= Math.imul(id.length + 3, 0x85ebca6b);
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35);
+  h ^= h >>> 16;
+  return (h >>> 0) % nSlots;
+}
+
+/**
+ * touch_fox: fox is faster, so pure chase fails. Each AI owns a stable surround
+ * slot and aims at an intercept / flank point (predict fox velocity + side offset).
+ * When close enough, close in for the actual touch.
+ *
+ * Goals should be **cached** by the caller (surroundRefreshMs) — recomputing
+ * every tick thrashs 8-dir when fox velocity flickers.
+ */
+export function touchFoxSurroundGoal(
+  rabbit: EntityState,
+  seeker: EntityState,
+  mapW: number,
+  mapH: number,
+  grantCount: number,
+): { x: number; y: number } {
+  const id = rabbit.id;
+  const nSlots = 8;
+  const slot = surroundSlot(id, grantCount, nSlots);
+  const slotAngle = (slot / nSlots) * Math.PI * 2 + (hash01(id, 19) - 0.5) * 0.35;
+
+  const dist = Math.hypot(rabbit.x - seeker.x, rabbit.y - seeker.y);
+  const foxSpd = Math.hypot(seeker.vx, seeker.vy);
+
+  // Final close-in: small stable offset toward fox (not exact body → less L↔R thrash)
+  if (dist < 72) {
+    const ox = Math.cos(slotAngle) * 14;
+    const oy = Math.sin(slotAngle) * 14;
+    return clampMap(seeker.x + ox, seeker.y + oy, mapW, mapH);
+  }
+
+  // Predict fox position a fraction of a second ahead (capped so goals stay sane)
+  const predT = foxSpd > 30 ? 0.55 : foxSpd > 10 ? 0.35 : 0.1;
+  const predX = seeker.x + seeker.vx * predT;
+  const predY = seeker.y + seeker.vy * predT;
+
+  let gx: number;
+  let gy: number;
+
+  if (foxSpd > 40) {
+    // Moving fox: cut ahead + left/right flanks (box-in), some rear pressure
+    const fdx = seeker.vx / foxSpd;
+    const fdy = seeker.vy / foxSpd;
+    const px = -fdy;
+    const py = fdx;
+    const sideSign = slot % 2 === 0 ? 1 : -1;
+    const sideMag = 55 + (slot % 4) * 28;
+    if (slot >= 6) {
+      // Rear/side cutters — block escape routes behind fox
+      const rear = 50 + (slot - 6) * 40;
+      gx = seeker.x - fdx * rear + px * sideSign * (90 + slot * 10);
+      gy = seeker.y - fdy * rear + py * sideSign * (90 + slot * 10);
+    } else {
+      // Front intercept + wide flanks
+      const ahead = 70 + Math.floor(slot / 2) * 28;
+      gx = seeker.x + fdx * ahead + px * sideSign * sideMag;
+      gy = seeker.y + fdy * ahead + py * sideSign * sideMag;
+    }
+  } else {
+    // Stationary / slow fox: ring surround, tighten with distance (stable radii)
+    const ring =
+      dist > 360 ? 140 : dist > 220 ? 100 : dist > 120 ? 55 : 28;
+    gx = predX + Math.cos(slotAngle) * ring;
+    gy = predY + Math.sin(slotAngle) * ring;
+  }
+
+  // Far approach: still use distinct ring slots (not the same chase point)
+  if (dist > 420) {
+    const ring = 140 + (slot % 4) * 18;
+    gx = predX + Math.cos(slotAngle) * ring;
+    gy = predY + Math.sin(slotAngle) * ring;
+  }
+
+  return clampMap(gx, gy, mapW, mapH);
+}
+
+/**
+ * Pick / hold a surround intercept for touch_fox.
+ * Returns whether the goal was freshly recomputed (for tests / debug).
+ */
+export function refreshTouchFoxSurroundGoal(
+  brain: AiBrain,
+  rabbit: EntityState,
+  seeker: EntityState,
+  mapW: number,
+  mapH: number,
+  grantCount: number,
+  dtMs: number,
+  force = false,
+): boolean {
+  brain.surroundRefreshMs = Math.max(0, brain.surroundRefreshMs - dtMs);
+  const goalDist = Math.hypot(
+    rabbit.x - brain.surroundGoalX,
+    rabbit.y - brain.surroundGoalY,
+  );
+  const foxToGoal = Math.hypot(
+    seeker.x - brain.surroundGoalX,
+    seeker.y - brain.surroundGoalY,
+  );
+  const distFox = Math.hypot(rabbit.x - seeker.x, rabbit.y - seeker.y);
+  // Stale intercept: fox ran far from our planned point
+  const interceptStale = foxToGoal > 220 && distFox > 90;
+  const arrived = goalDist < AI_ARRIVAL_DIST + 6;
+  if (!force && brain.surroundRefreshMs > 0 && !arrived && !interceptStale) {
+    return false;
+  }
+  const g = touchFoxSurroundGoal(rabbit, seeker, mapW, mapH, grantCount);
+  brain.surroundGoalX = g.x;
+  brain.surroundGoalY = g.y;
+  // Hold longer when far (stable approach); refresh sooner when boxing-in
+  brain.surroundRefreshMs =
+    distFox < 90 ? 200 : distFox < 220 ? 380 : distFox < 380 ? 520 : 640;
+  return true;
+}
+
 function armMissionPlan(
   brain: AiBrain,
   e: EntityState,
@@ -274,46 +484,34 @@ function armMissionPlan(
   brain.missionDepartDelayMs =
     hash01(e.id, grant * 31 + Math.round(m.targetX)) * AI_MISSION_STAGGER_MS_MAX;
 
-  // One-way approach phase: sweep_by starts at offset, others go straight to point
+  // Through-point: every pattern approaches a point past the marker
+  const thru = beyondPoint(
+    e.x,
+    e.y,
+    m.targetX,
+    m.targetY,
+    state.config.mapWidth,
+    state.config.mapHeight,
+    220 + hash01(e.id, grant) * 200,
+  );
+  brain.approachX = thru.x;
+  brain.approachY = thru.y;
+
   if (brain.visitPattern === 'sweep_by') {
     const off = approachOffset(e.id, m.targetX, m.targetY, grant);
     brain.offsetX = off.x;
     brain.offsetY = off.y;
     brain.visitPhase = 'offset';
-  } else if (brain.visitPattern === 'pass_through') {
-    // Aim beyond immediately so path crosses the completion circle
-    brain.visitPhase = 'point'; // still track until tagged; goal uses after
-    const b = beyondPoint(
-      e.x,
-      e.y,
-      m.targetX,
-      m.targetY,
-      state.config.mapWidth,
-      state.config.mapHeight,
-      220 + hash01(e.id, grant) * 200,
-    );
-    brain.afterX = b.x;
-    brain.afterY = b.y;
   } else {
     brain.visitPhase = 'point';
   }
 
-  // Precompute after-goal for variety
+  // Exit goal after tagging the radius
   if (brain.visitPattern === 'pass_through' || brain.visitPattern === 'sweep_by') {
-    if (brain.visitPattern === 'sweep_by') {
-      const b = beyondPoint(
-        e.x,
-        e.y,
-        m.targetX,
-        m.targetY,
-        state.config.mapWidth,
-        state.config.mapHeight,
-        220 + hash01(e.id, grant) * 200,
-      );
-      brain.afterX = b.x;
-      brain.afterY = b.y;
-    }
+    brain.afterX = thru.x;
+    brain.afterY = thru.y;
   } else if (brain.visitPattern === 'touch_leave') {
+    // Leave roughly opposite of arrival
     const leave = beyondPoint(
       m.targetX,
       m.targetY,
@@ -331,11 +529,17 @@ function armMissionPlan(
     brain.afterY = p.y;
   }
   brain.dirHoldMs = 0;
+  brain.stuckMs = 0;
+  brain.escapeHoldMs = 0;
+  brain.surroundGoalX = e.x;
+  brain.surroundGoalY = e.y;
+  brain.surroundRefreshMs = 0;
 }
 
 /**
  * Update AI velocities — 8-dir + hold; visit missions use staggered departures
  * and varied pass-through / leave patterns so AI keep moving after the point.
+ * Near goals: short hold + arrival replan to avoid L↔R thrash / freeze.
  */
 export function stepAiCrowd(state: MatchState, dtMs: number, seed = 1): MatchState {
   if (state.phase !== 'playing') return state;
@@ -356,7 +560,29 @@ export function stepAiCrowd(state: MatchState, dtMs: number, seed = 1): MatchSta
     if (!brain) {
       const p = randomMapPoint(rng, mapW, mapH);
       brain = emptyBrain(p.x, p.y, 200 + rng() * 400);
+      brain.lastX = e.x;
+      brain.lastY = e.y;
       brains.set(key, brain);
+    } else if (
+      typeof brain.stuckMs !== 'number' ||
+      typeof brain.escapeHoldMs !== 'number' ||
+      typeof brain.surroundRefreshMs !== 'number'
+    ) {
+      // Hot-reload / older brain shape
+      brain.lastX = e.x;
+      brain.lastY = e.y;
+      brain.stuckMs = 0;
+      brain.sawMotion = false;
+      brain.escapeHoldMs = 0;
+      if (typeof brain.approachX !== 'number') {
+        brain.approachX = e.x;
+        brain.approachY = e.y;
+      }
+      if (typeof brain.surroundGoalX !== 'number') {
+        brain.surroundGoalX = e.x;
+        brain.surroundGoalY = e.y;
+        brain.surroundRefreshMs = 0;
+      }
     }
 
     // New mission → arm staggered plan
@@ -375,112 +601,12 @@ export function stepAiCrowd(state: MatchState, dtMs: number, seed = 1): MatchSta
     let allowIdleAtGoal = true;
 
     if (mission) {
-      const completed = mission.completedIds.includes(e.id);
-      const distToPoint = Math.hypot(e.x - mission.targetX, e.y - mission.targetY);
-      // Only count a visit when inside the SAME radius used for mission completion
-      if (mission.kind === 'visit_point' && distToPoint <= MISSION_VISIT_RADIUS) {
-        brain.visitedPoint = true;
-        brain.visitPhase = 'after';
-      }
-      if (completed && brain.visitPhase !== 'after') {
-        brain.visitPhase = 'after';
-        brain.visitedPoint = true;
-      }
-
-      // Still waiting to depart — wander (not freeze, not all rush together)
-      if (brain.missionDepartDelayMs > 0 && brain.visitPhase !== 'after') {
-        brain.missionDepartDelayMs = Math.max(0, brain.missionDepartDelayMs - dtMs);
+      // Intentionally sit out this mission — wander only, never pursue goal
+      const isSkipper = (mission.skipIds ?? []).includes(e.id);
+      if (isSkipper) {
         allowIdleAtGoal = false;
         if (brain.idleMs <= 0) {
-          const p = randomMapPoint(rng, mapW, mapH);
-          brain.targetX = p.x;
-          brain.targetY = p.y;
-          brain.idleMs = 300 + rng() * 900;
-          brain.dirHoldMs = 0;
-        }
-        goalX = brain.targetX;
-        goalY = brain.targetY;
-      } else if (mission.kind === 'visit_point' && brain.visitPhase === 'after') {
-        // After actually entering completion radius: keep moving (pattern exit)
-        allowIdleAtGoal = false;
-        const distAfter = Math.hypot(e.x - brain.afterX, e.y - brain.afterY);
-        if (distAfter < 28 || brain.idleMs <= 0) {
-          if (brain.visitPattern === 'pass_through' || brain.visitPattern === 'sweep_by') {
-            const b = beyondPoint(
-              mission.targetX,
-              mission.targetY,
-              brain.afterX,
-              brain.afterY,
-              mapW,
-              mapH,
-              160 + rng() * 160,
-            );
-            brain.afterX = b.x;
-            brain.afterY = b.y;
-          } else {
-            const p = randomMapPoint(rng, mapW, mapH);
-            brain.afterX = p.x;
-            brain.afterY = p.y;
-          }
-          brain.idleMs = 500 + rng() * 1200;
-          brain.dirHoldMs = 0;
-        } else {
-          brain.idleMs -= dtMs * 0.15;
-        }
-        goalX = brain.afterX;
-        goalY = brain.afterY;
-      } else if (mission.kind === 'visit_point') {
-        // Monotonic approach: never flip offset↔point each tick
-        allowIdleAtGoal = false;
-        if (brain.visitPattern === 'pass_through') {
-          // Aim beyond so path crosses completion circle (phase stays point until tagged)
-          goalX = brain.afterX;
-          goalY = brain.afterY;
-        } else if (brain.visitPattern === 'sweep_by') {
-          if (brain.visitPhase === 'offset') {
-            const dOff = Math.hypot(e.x - brain.offsetX, e.y - brain.offsetY);
-            if (dOff <= 40) {
-              // Advance once — never go back to offset
-              brain.visitPhase = 'point';
-              brain.dirHoldMs = 0;
-              goalX = mission.targetX;
-              goalY = mission.targetY;
-            } else {
-              goalX = brain.offsetX;
-              goalY = brain.offsetY;
-            }
-          } else {
-            // phase === 'point': hold until inside visit radius
-            goalX = mission.targetX;
-            goalY = mission.targetY;
-          }
-        } else {
-          // touch_leave / linger_then_go: go to the point itself first
-          brain.visitPhase = 'point';
-          goalX = mission.targetX;
-          goalY = mission.targetY;
-        }
-      } else if (mission.kind === 'touch_fox' && seeker && !completed) {
-        allowIdleAtGoal = false;
-        if (brain.missionDepartDelayMs > 0) {
-          brain.missionDepartDelayMs = Math.max(0, brain.missionDepartDelayMs - dtMs);
-          if (brain.idleMs <= 0) {
-            const p = randomMapPoint(rng, mapW, mapH);
-            brain.targetX = p.x;
-            brain.targetY = p.y;
-            brain.idleMs = 200 + rng() * 600;
-          }
-          goalX = brain.targetX;
-          goalY = brain.targetY;
-        } else {
-          goalX = seeker.x;
-          goalY = seeker.y;
-        }
-      } else {
-        // Completed touch_fox or no seeker: wander
-        allowIdleAtGoal = false;
-        if (brain.idleMs <= 0) {
-          const p = randomMapPoint(rng, mapW, mapH);
+          const p = farAwayFrom(rng, e.x, e.y, mapW, mapH);
           brain.targetX = p.x;
           brain.targetY = p.y;
           brain.idleMs = 400 + rng() * 1400;
@@ -488,11 +614,99 @@ export function stepAiCrowd(state: MatchState, dtMs: number, seed = 1): MatchSta
         }
         goalX = brain.targetX;
         goalY = brain.targetY;
+      } else {
+        const completed = mission.completedIds.includes(e.id);
+        const distToPoint = Math.hypot(e.x - mission.targetX, e.y - mission.targetY);
+        // Only count a visit when inside the SAME radius used for mission completion
+        if (mission.kind === 'visit_point' && distToPoint <= MISSION_VISIT_RADIUS) {
+          brain.visitedPoint = true;
+          brain.visitPhase = 'after';
+        }
+        if (completed && brain.visitPhase !== 'after') {
+          brain.visitPhase = 'after';
+          brain.visitedPoint = true;
+        }
+
+        // Still waiting to depart — wander (not freeze, not all rush together)
+        if (brain.missionDepartDelayMs > 0 && brain.visitPhase !== 'after') {
+          brain.missionDepartDelayMs = Math.max(0, brain.missionDepartDelayMs - dtMs);
+          allowIdleAtGoal = false;
+          if (brain.idleMs <= 0) {
+            const p = farAwayFrom(rng, e.x, e.y, mapW, mapH, 120);
+            brain.targetX = p.x;
+            brain.targetY = p.y;
+            brain.idleMs = 300 + rng() * 900;
+            brain.dirHoldMs = 0;
+          }
+          goalX = brain.targetX;
+          goalY = brain.targetY;
+        } else if (mission.kind === 'visit_point' && brain.visitPhase === 'after') {
+          // After entering completion radius: keep moving (pattern exit)
+          allowIdleAtGoal = false;
+          const distAfter = Math.hypot(e.x - brain.afterX, e.y - brain.afterY);
+          if (distAfter < AI_ARRIVAL_DIST + 10 || brain.idleMs <= 0) {
+            if (brain.visitPattern === 'pass_through' || brain.visitPattern === 'sweep_by') {
+              const b = beyondPoint(
+                mission.targetX,
+                mission.targetY,
+                brain.afterX,
+                brain.afterY,
+                mapW,
+                mapH,
+                200 + rng() * 180,
+              );
+              brain.afterX = b.x;
+              brain.afterY = b.y;
+            } else {
+              const p = farAwayFrom(rng, e.x, e.y, mapW, mapH);
+              brain.afterX = p.x;
+              brain.afterY = p.y;
+            }
+            brain.idleMs = 500 + rng() * 1200;
+            brain.dirHoldMs = 0;
+          } else {
+            brain.idleMs -= dtMs * 0.15;
+          }
+          goalX = brain.afterX;
+          goalY = brain.afterY;
+        } else if (mission.kind === 'visit_point') {
+          // Always aim through approachX/Y (past marker), never exact target
+          allowIdleAtGoal = false;
+          if (brain.visitPattern === 'sweep_by' && brain.visitPhase === 'offset') {
+            const dOff = Math.hypot(e.x - brain.offsetX, e.y - brain.offsetY);
+            if (dOff <= AI_ARRIVAL_DIST + 14) {
+              brain.visitPhase = 'point';
+              brain.dirHoldMs = 0;
+              brain.escapeHoldMs = 0;
+              goalX = brain.approachX;
+              goalY = brain.approachY;
+            } else {
+              goalX = brain.offsetX;
+              goalY = brain.offsetY;
+            }
+          } else {
+            brain.visitPhase = 'point';
+            goalX = brain.approachX;
+            goalY = brain.approachY;
+          }
+        } else {
+          // touch_rabbit (user-only T) or completed visit: AI wanders
+          allowIdleAtGoal = false;
+          if (brain.idleMs <= 0) {
+            const p = farAwayFrom(rng, e.x, e.y, mapW, mapH);
+            brain.targetX = p.x;
+            brain.targetY = p.y;
+            brain.idleMs = 400 + rng() * 1400;
+            brain.dirHoldMs = 0;
+          }
+          goalX = brain.targetX;
+          goalY = brain.targetY;
+        }
       }
     } else {
       // No mission: classic waypoint wander
       if (brain.idleMs <= 0) {
-        const p = randomMapPoint(rng, mapW, mapH);
+        const p = farAwayFrom(rng, e.x, e.y, mapW, mapH);
         brain.targetX = p.x;
         brain.targetY = p.y;
         brain.idleMs = 400 + rng() * 1800;
@@ -502,50 +716,167 @@ export function stepAiCrowd(state: MatchState, dtMs: number, seed = 1): MatchSta
       goalY = brain.targetY;
     }
 
-    const dx = goalX - e.x;
-    const dy = goalY - e.y;
-    const dist = Math.hypot(dx, dy);
+    let dx = goalX - e.x;
+    let dy = goalY - e.y;
+    let dist = Math.hypot(dx, dy);
 
+    // Non-mission idle only (mission never freezes in place)
     if (allowIdleAtGoal && dist < 12) {
       brain.idleMs -= dtMs;
       brain.dirNx = 0;
       brain.dirNy = 0;
       brain.dirHoldMs = 0;
+      brain.stuckMs = 0;
+      brain.lastX = e.x;
+      brain.lastY = e.y;
       entities[e.id] = { ...e, vx: 0, vy: 0 };
       continue;
     }
 
-    // Mission / post-visit: never hard-stop at goal — pick next if very close
-    if (!allowIdleAtGoal && dist < 10) {
+    // Arrival: one-shot replan — never aim at self, never jitter goal every tick
+    if (!allowIdleAtGoal && dist < AI_ARRIVAL_DIST) {
       if (mission && (brain.visitedPoint || mission.completedIds.includes(e.id))) {
-        const p = randomMapPoint(rng, mapW, mapH);
+        const p = farAwayFrom(rng, e.x, e.y, mapW, mapH);
         brain.afterX = p.x;
         brain.afterY = p.y;
+        brain.targetX = p.x;
+        brain.targetY = p.y;
+        goalX = p.x;
+        goalY = p.y;
         brain.dirHoldMs = 0;
+      } else if (mission?.kind === 'visit_point' && brain.visitPhase === 'offset') {
+        brain.visitPhase = 'point';
+        goalX = brain.approachX;
+        goalY = brain.approachY;
+        brain.dirHoldMs = 0;
+        brain.escapeHoldMs = 0;
       } else if (mission?.kind === 'visit_point') {
-        // Nudge toward actual point / beyond so we don't freeze
-        goalX = mission.targetX + (rng() - 0.5) * 20;
-        goalY = mission.targetY + (rng() - 0.5) * 20;
+        // Re-arm through-point past the marker (do not jitter randomly)
+        const b = beyondPoint(
+          e.x,
+          e.y,
+          mission.targetX,
+          mission.targetY,
+          mapW,
+          mapH,
+          180 + rng() * 100,
+        );
+        brain.approachX = b.x;
+        brain.approachY = b.y;
+        goalX = b.x;
+        goalY = b.y;
+        brain.dirHoldMs = 0;
+        brain.escapeHoldMs = 220;
+      } else {
+        const p = farAwayFrom(rng, e.x, e.y, mapW, mapH);
+        brain.targetX = p.x;
+        brain.targetY = p.y;
+        goalX = p.x;
+        goalY = p.y;
+        brain.dirHoldMs = 0;
       }
+      dx = goalX - e.x;
+      dy = goalY - e.y;
+      dist = Math.hypot(dx, dy);
     }
 
-    const dx2 = goalX - e.x;
-    const dy2 = goalY - e.y;
-    const preferred = quantizeTo8Dir(dx2, dy2);
-    if (shouldRelockDir(brain, preferred, dx2, dy2)) {
-      brain.dirNx = preferred.nx;
-      brain.dirNy = preferred.ny;
+    // Stuck detection only after we've seen real displacement (host runs integrateMotion).
+    // Pure velocity-step unit tests never move x/y — don't false-trigger thrash breaks.
+    const moved = Math.hypot(e.x - brain.lastX, e.y - brain.lastY);
+    if (moved >= AI_STUCK_MOVE_EPS) {
+      brain.stuckMs = 0;
+      brain.sawMotion = true;
+    } else if (brain.sawMotion && (brain.dirNx !== 0 || brain.dirNy !== 0)) {
+      brain.stuckMs += dtMs;
+    } else {
+      brain.stuckMs = 0;
+    }
+    brain.lastX = e.x;
+    brain.lastY = e.y;
+
+    if (brain.sawMotion && brain.stuckMs >= AI_STUCK_MS) {
+      // Break thrash / corner freeze
+      if (mission && brain.visitPhase === 'after') {
+        const p = farAwayFrom(rng, e.x, e.y, mapW, mapH);
+        brain.afterX = p.x;
+        brain.afterY = p.y;
+        goalX = p.x;
+        goalY = p.y;
+      } else if (mission?.kind === 'visit_point' && brain.visitPhase !== 'after') {
+        // Side approach toward mission point
+        const ang = Math.atan2(mission.targetY - e.y, mission.targetX - e.x);
+        const side = rng() < 0.5 ? 1 : -1;
+        goalX = mission.targetX + Math.cos(ang + side * 0.9) * 100;
+        goalY = mission.targetY + Math.sin(ang + side * 0.9) * 100;
+      } else {
+        const p = farAwayFrom(rng, e.x, e.y, mapW, mapH);
+        brain.targetX = p.x;
+        brain.targetY = p.y;
+        goalX = p.x;
+        goalY = p.y;
+      }
+      dx = goalX - e.x;
+      dy = goalY - e.y;
+      dist = Math.hypot(dx, dy);
+      brain.dirHoldMs = 0;
+      brain.stuckMs = 0;
+      const d = EIGHT_DIR_UNIT[Math.floor(rng() * EIGHT_DIR_UNIT.length)]!;
+      brain.dirNx = d[0];
+      brain.dirNy = d[1];
+      brain.dirHoldMs = AI_DIR_HOLD_MS_NEAR + rng() * 80;
+      brain.escapeHoldMs = 300;
+    }
+
+    const preferred = quantizeTo8Dir(dx, dy);
+    const near = dist < AI_NEAR_GOAL_DIST;
+    const onMissionPath =
+      !!mission &&
+      !allowIdleAtGoal &&
+      !(mission.skipIds ?? []).includes(e.id);
+
+    // Near goal / mission approach: commit to one 8-dir for a short escape window
+    // so preferred cannot flip L↔R every tick.
+    if (brain.escapeHoldMs > 0) {
+      brain.escapeHoldMs = Math.max(0, brain.escapeHoldMs - dtMs);
+    } else if (near || (onMissionPath && dist < AI_NEAR_GOAL_DIST * 1.4)) {
+      const nx = preferred.nx !== 0 || preferred.ny !== 0
+        ? preferred.nx
+        : EIGHT_DIR_UNIT[Math.floor(rng() * 8)]![0];
+      const ny = preferred.nx !== 0 || preferred.ny !== 0
+        ? preferred.ny
+        : EIGHT_DIR_UNIT[Math.floor(rng() * 8)]![1];
+      // If new preferred is ~opposite of current, keep current (anti-thrash)
+      const reverse =
+        brain.dirNx !== 0 &&
+        brain.dirNy !== 0 &&
+        nx * brain.dirNx + ny * brain.dirNy < -0.5;
+      if (!reverse || (brain.dirNx === 0 && brain.dirNy === 0)) {
+        brain.dirNx = nx;
+        brain.dirNy = ny;
+      }
+      brain.escapeHoldMs = 280 + rng() * 120;
+      brain.dirHoldMs = brain.escapeHoldMs;
+    } else if (shouldRelockDir(brain, preferred, dx, dy, dist)) {
+      if (preferred.nx === 0 && preferred.ny === 0) {
+        const d = EIGHT_DIR_UNIT[Math.floor(rng() * EIGHT_DIR_UNIT.length)]!;
+        brain.dirNx = d[0];
+        brain.dirNy = d[1];
+      } else {
+        brain.dirNx = preferred.nx;
+        brain.dirNy = preferred.ny;
+      }
       brain.dirHoldMs = freshHoldMs(rng);
     } else {
       brain.dirHoldMs = Math.max(0, brain.dirHoldMs - dtMs);
     }
 
-    // If somehow zero dir, force a random 8-dir so we never stick motionless mid-mission
+    // Never motionless mid-walk
     if (brain.dirNx === 0 && brain.dirNy === 0) {
       const d = EIGHT_DIR_UNIT[Math.floor(rng() * EIGHT_DIR_UNIT.length)]!;
       brain.dirNx = d[0];
       brain.dirNy = d[1];
-      brain.dirHoldMs = freshHoldMs(rng);
+      brain.escapeHoldMs = 300;
+      brain.dirHoldMs = 300;
     }
 
     entities[e.id] = {

@@ -65,7 +65,7 @@ describe('total catch budget (AI + human)', () => {
     expect(r.kind).toBe('ai');
     expect(r.state.catchBudgetRemaining).toBe(2);
     expect(humanCatchScore(r.state)).toBe(0);
-    state = r.state;
+    state = { ...r.state, catchCooldownRemainingMs: 0 };
     r = attemptCatch(state, seekerId, hiderId);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -103,7 +103,7 @@ describe('total catch budget (AI + human)', () => {
     let r = attemptCatch(state, seekerId, ais[0]!.id);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    state = r.state;
+    state = { ...r.state, catchCooldownRemainingMs: 0 };
     expect(state.catchBudgetRemaining).toBe(1);
     r = attemptCatch(state, seekerId, ais[1]!.id);
     expect(r.ok).toBe(true);

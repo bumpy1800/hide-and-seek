@@ -1,27 +1,20 @@
 import { Peer, type DataConnection } from 'peerjs';
 import {
-  PLAYER_SPEED,
-  RABBIT_SPEED,
-  SEEKER_SPEED,
-  applyMissionAction,
-  attemptCatch,
+  applyPlayingIntent,
   applyRoomSettings,
   createLobby,
   defaultConfig,
-  integrateMotion,
-  isSeekerPrepActive,
   joinHuman,
   leaveHuman,
-  nearestCatchTarget,
+  matchEndedDetail,
   normalizeRoomSettings,
   resetAiBrains,
   returnToLobby,
-  setEntityVelocity,
   startMatch,
-  stepAiCrowd,
-  tickTimer,
+  tickAuthority,
   type ClientIntent,
   type ClientMessage,
+  type HostSimEvent,
   type MatchState,
   type RoomSettings,
   type ServerMessage,
@@ -91,6 +84,7 @@ export class PeerMultiplayer {
         timeLimitMs: opts.timeLimitMs,
         aiCount: opts.aiCount,
         foxMode: opts.foxMode,
+        ruleMode: opts.ruleMode,
       }),
     );
     this.state = applyRoomSettings(this.state, opts);
@@ -152,11 +146,19 @@ export class PeerMultiplayer {
     return this.localPlayerId;
   }
 
-  destroy(): void {
-    if (this.tickTimer) clearInterval(this.tickTimer);
-    this.tickTimer = null;
-    if (this.listHeartbeat) clearInterval(this.listHeartbeat);
-    this.listHeartbeat = null;
+  /**
+   * Stop ticks + close data channels without PeerJS destroy (destroy can hang UI).
+   * Safe to call multiple times.
+   */
+  softDisconnect(): void {
+    if (this.tickTimer) {
+      clearInterval(this.tickTimer);
+      this.tickTimer = null;
+    }
+    if (this.listHeartbeat) {
+      clearInterval(this.listHeartbeat);
+      this.listHeartbeat = null;
+    }
     if (this.isHost && this.localPlayerId) {
       try {
         getRoomDirectory().close(this.localPlayerId);
@@ -164,10 +166,32 @@ export class PeerMultiplayer {
         /* ignore */
       }
     }
-    for (const c of this.conns.values()) c.close();
+    for (const c of this.conns.values()) {
+      try {
+        c.close();
+      } catch {
+        /* ignore */
+      }
+    }
     this.conns.clear();
-    this.peer?.destroy();
+    this.onMessage = null;
+    this.onStatus = null;
+  }
+
+  destroy(): void {
+    this.softDisconnect();
+    const p = this.peer;
     this.peer = null;
+    // Defer PeerJS destroy — sync destroy has frozen the game loop in practice
+    if (p) {
+      setTimeout(() => {
+        try {
+          p.destroy();
+        } catch {
+          /* ignore */
+        }
+      }, 0);
+    }
   }
 
   private async ensureDirectory(): Promise<void> {
@@ -189,6 +213,8 @@ export class PeerMultiplayer {
       maxPlayers: this.state.config.maxHumans,
       phase: this.state.phase === 'lobby' ? 'lobby' : this.state.phase === 'playing' ? 'playing' : 'ended',
       updatedAt: Date.now(),
+      game: 'hide-and-seek',
+      ruleMode: this.state.ruleMode ?? this.state.config?.ruleMode,
     };
     // Only lobby rooms appear in clickable list
     if (room.phase === 'lobby') {
@@ -274,6 +300,23 @@ export class PeerMultiplayer {
   }
 
   private applyIntent(playerId: string, intent: ClientIntent): void {
+    // Host-only: put room back in waiting lobby (no auto rematch)
+    if (intent.type === 'return_to_lobby') {
+      if (!this.isHost || playerId !== this.localPlayerId) return;
+      if (this.state.phase !== 'ended' && this.state.phase !== 'playing') return;
+      this.state = returnToLobby(this.state);
+      resetAiBrains(this.state.roomId);
+      this.endedBroadcast = false;
+      this.broadcastSnapshot();
+      this.publishListing();
+      this.broadcast({
+        type: 'event',
+        event: 'returned_to_lobby',
+        detail: {},
+      });
+      return;
+    }
+
     if (intent.type === 'start') {
       if (this.state.phase === 'playing' || this.state.phase === 'starting') return;
       if (this.state.phase === 'ended') {
@@ -301,6 +344,7 @@ export class PeerMultiplayer {
           seed: Date.now() ^ this.state.humans.length,
           foxMode,
           designatedSeekerId,
+          ruleMode: intent.ruleMode ?? this.state.ruleMode ?? this.state.config?.ruleMode,
         });
         this.endedBroadcast = false;
         this.broadcastSnapshot();
@@ -334,64 +378,28 @@ export class PeerMultiplayer {
       return;
     }
 
-    if (this.state.phase !== 'playing') return;
-    const entity = this.state.entities[playerId];
-    if (!entity || !entity.alive) return;
+    // Playing intents (move / mission / darkness / catch) via shared hostSim
+    const result = applyPlayingIntent(this.state, playerId, intent);
+    this.state = result.state;
+    this.dispatchHostEvents(result.events);
+  }
 
-    if (intent.type === 'move') {
-      if (this.state.seekerId === playerId && isSeekerPrepActive(this.state)) return;
-      const len = Math.hypot(intent.dx, intent.dy) || 1;
-      const nx = intent.dx / len;
-      const ny = intent.dy / len;
-      const isSeeker = this.state.seekerId === playerId;
-      const speed = isSeeker ? SEEKER_SPEED : RABBIT_SPEED;
-      const vx = intent.dx === 0 && intent.dy === 0 ? 0 : nx * speed;
-      const vy = intent.dx === 0 && intent.dy === 0 ? 0 : ny * speed;
-      this.state = setEntityVelocity(this.state, playerId, vx, vy);
-      return;
-    }
-
-    if (intent.type === 'mission_action') {
-      this.state = applyMissionAction(this.state, playerId);
-      this.broadcastSnapshot();
-      return;
-    }
-
-    if (intent.type === 'catch') {
-      if (isSeekerPrepActive(this.state)) return;
-      // Rabbit Space during touch_fox mission → mission action (not catch)
-      if (
-        this.state.seekerId !== playerId &&
-        this.state.mission?.kind === 'touch_fox'
-      ) {
-        this.state = applyMissionAction(this.state, playerId);
+  private dispatchHostEvents(events: HostSimEvent[]): void {
+    for (const ev of events) {
+      if (ev.kind === 'snapshot') {
         this.broadcastSnapshot();
-        return;
+        continue;
       }
-      const targetId = nearestCatchTarget(this.state, playerId);
-      if (!targetId) {
-        this.emitTo(playerId, { type: 'event', event: 'catch_miss', detail: { reason: 'no_target' } });
-        return;
-      }
-      const result = attemptCatch(this.state, playerId, targetId);
-      this.state = result.state;
-      // Broadcast full catch detail so every client can toast + spawn graves
-      this.broadcast({
+      const msg: ServerMessage = {
         type: 'event',
-        event: result.ok ? 'catch_success' : 'catch_fail',
-        detail: result.ok
-          ? {
-              ok: true,
-              kind: result.kind,
-              name: result.name,
-              x: result.x,
-              y: result.y,
-              caughtId: result.caughtId,
-              placeGrave: result.placeGrave,
-            }
-          : result,
-      });
-      this.broadcastSnapshot();
+        event: ev.event,
+        detail: ev.detail,
+      };
+      if (ev.to && ev.to !== 'all') {
+        this.emitTo(ev.to, msg);
+      } else {
+        this.broadcast(msg);
+      }
     }
   }
 
@@ -399,23 +407,15 @@ export class PeerMultiplayer {
     if (this.tickTimer) return;
     this.tickTimer = setInterval(() => {
       if (this.state.phase !== 'playing' && this.state.phase !== 'starting') return;
-      if (this.state.phase === 'playing') {
-        this.state = stepAiCrowd(this.state, this.tickMs, this.state.tick + 1);
-        this.state = integrateMotion(this.state, this.tickMs / 1000);
-      }
-      this.state = tickTimer(this.state, this.tickMs);
+      this.state = tickAuthority(this.state, this.tickMs);
       this.broadcastSnapshot();
       if (this.state.phase === 'ended' && !this.endedBroadcast) {
         this.endedBroadcast = true;
+        resetAiBrains(this.state.roomId);
         this.broadcast({
           type: 'event',
           event: 'match_ended',
-          detail: {
-            winner: this.state.winner,
-            reason: this.state.endReason,
-            humanCatches: this.state.caughtHumans?.length ?? 0,
-            catchBudget: this.state.config.catchBudget,
-          },
+          detail: matchEndedDetail(this.state),
         });
       }
     }, this.tickMs);
@@ -453,5 +453,3 @@ export class PeerMultiplayer {
     this.onMessage?.(msg);
   }
 }
-
-void PLAYER_SPEED;

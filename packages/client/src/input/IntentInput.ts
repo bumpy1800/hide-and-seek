@@ -17,8 +17,12 @@ export class IntentInput {
     d: Phaser.Input.Keyboard.Key;
   };
   private space!: Phaser.Input.Keyboard.Key;
+  private keyK!: Phaser.Input.Keyboard.Key;
+  private keyT!: Phaser.Input.Keyboard.Key;
   private stick = { dx: 0, dy: 0 };
   private catchQueued = false;
+  private darknessQueued = false;
+  private missionQueued = false;
   private base!: Phaser.GameObjects.Arc;
   private knob!: Phaser.GameObjects.Arc;
   private catchBtn!: Phaser.GameObjects.Container;
@@ -27,6 +31,8 @@ export class IntentInput {
   private readonly stickRadius = 56;
   private readonly mobileKeypad: boolean;
   private touchEnabled = false;
+  /** When true, mobile catch button fires mission_action (touch_rabbit). */
+  private catchAsMissionTouch = false;
 
   constructor(private scene: Phaser.Scene) {
     const kb = scene.input.keyboard;
@@ -41,6 +47,8 @@ export class IntentInput {
       d: kb.addKey(Phaser.Input.Keyboard.KeyCodes.D),
     };
     this.space = kb.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+    this.keyK = kb.addKey(Phaser.Input.Keyboard.KeyCodes.K);
+    this.keyT = kb.addKey(Phaser.Input.Keyboard.KeyCodes.T);
 
     this.mobileKeypad = shouldShowMobileKeypad(
       collectBrowserMobileSignals(
@@ -80,12 +88,20 @@ export class IntentInput {
 
     this.catchBtn.on('pointerdown', () => {
       if (!this.mobileKeypad || !this.touchEnabled) return;
-      this.catchQueued = true;
+      // Label "T" during touch_rabbit mission → mission_action; else catch
+      if (this.catchAsMissionTouch) {
+        this.missionQueued = true;
+      } else {
+        this.catchQueued = true;
+      }
     });
 
     scene.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
       if (!this.mobileKeypad || !this.touchEnabled) return;
-      if (p.x < scene.scale.width * 0.45) {
+      // Bottom UI strip (로비/시작 버튼) — never steal for virtual stick
+      if (p.y > scene.scale.height - 120) return;
+      // Left zone only for stick
+      if (p.x < scene.scale.width * 0.4 && p.y > scene.scale.height * 0.45) {
         this.activePointerId = p.id;
         this.updateStick(p.x, p.y);
       }
@@ -107,6 +123,12 @@ export class IntentInput {
 
     this.space.on('down', () => {
       this.catchQueued = true;
+    });
+    this.keyK.on('down', () => {
+      this.darknessQueued = true;
+    });
+    this.keyT.on('down', () => {
+      this.missionQueued = true;
     });
 
     // Initial: hide touch chrome on desktop; catch visibility set by GameScene for seeker
@@ -159,12 +181,48 @@ export class IntentInput {
       intents.push({ type: 'catch' });
       this.catchQueued = false;
     }
+    if (this.darknessQueued) {
+      intents.push({ type: 'darkness' });
+      this.darknessQueued = false;
+    }
+    if (this.missionQueued) {
+      intents.push({ type: 'mission_action' });
+      this.missionQueued = false;
+    }
     return intents;
   }
 
   /** Catch button only on mobile seeker (or practice never). */
   setCatchVisible(visible: boolean): void {
     this.catchBtn.setVisible(this.mobileKeypad && visible);
+  }
+
+  /**
+   * Mobile action button: fox catch vs rabbit T (touch_rabbit mission).
+   * `mode` 'catch' | 'mission' | 'hidden'
+   */
+  setActionButtonMode(mode: 'catch' | 'mission' | 'hidden'): void {
+    if (!this.mobileKeypad) {
+      this.catchBtn.setVisible(false);
+      this.catchAsMissionTouch = false;
+      return;
+    }
+    if (mode === 'hidden') {
+      this.catchBtn.setVisible(false);
+      this.catchAsMissionTouch = false;
+      return;
+    }
+    this.catchBtn.setVisible(true);
+    this.catchAsMissionTouch = mode === 'mission';
+    const label = this.catchBtn.list[1] as Phaser.GameObjects.Text | undefined;
+    const bg = this.catchBtn.list[0] as Phaser.GameObjects.Arc | undefined;
+    if (mode === 'mission') {
+      label?.setText('T');
+      bg?.setFillStyle(0x27ae60, 0.9);
+    } else {
+      label?.setText('CATCH');
+      bg?.setFillStyle(0xe74c3c, 0.85);
+    }
   }
 
   destroy(): void {

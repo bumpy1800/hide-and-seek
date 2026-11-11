@@ -1,12 +1,13 @@
-# Hide & Seek — Blend
+# 스낵게임 (Snack Games)
 
-최대 8명 멀티플레이 숨바꼭질. 술래는 랜덤 배정되고, 숨는 사람은 AI 군중과 **동일한 외형**으로 연기합니다. 술래는 어색한 움직임으로 사람을 가려내 잡습니다.
+짧은 미니게임 모음. 현재 1호 게임은 **AI 술래잡기**(초원 숨바꼭질).
 
 ## Play
-- **Client (Vercel):** https://hide-and-seek-jet.vercel.app  
-- **Full stack (static + WebSocket):** https://proxy-examined-kept-humanity.trycloudflare.com  
-  (Cloudflare quick tunnel → local authoritative server; re-run tunnel when offline)
+- **Production:** https://hide-and-seek-jet.vercel.app  
 - **Source:** https://github.com/bumpy1800/hide-and-seek
+
+### AI 술래잡기
+최대 8명 멀티플레이 숨바꼭질. 술래는 랜덤 배정되고, 숨는 사람은 AI 군중과 **동일한 외형**으로 연기합니다.
 
 ## Stack
 - Client: TypeScript + Vite + Phaser 3

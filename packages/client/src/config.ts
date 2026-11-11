@@ -1,8 +1,12 @@
 import Phaser from 'phaser';
 import { VIEWPORT_HEIGHT, VIEWPORT_WIDTH } from '@hide-and-seek/shared';
 import { BootScene } from './scenes/BootScene';
+import { HubScene } from './scenes/HubScene';
 import { MenuScene } from './scenes/MenuScene';
 import { GameScene } from './scenes/GameScene';
+import { MeteorMenuScene } from './scenes/MeteorMenuScene';
+import { MeteorGameScene } from './scenes/MeteorGameScene';
+
 import { isEphemeralWsUrl, preferPeerMultiplayer as preferPeerFromEnv } from './net/multiplayerMode';
 
 export { isEphemeralWsUrl, preferPeerFromEnv as preferPeerMultiplayerLogic };
@@ -42,7 +46,14 @@ export function createGameConfig(parent: string | HTMLElement): Phaser.Types.Cor
       default: 'arcade',
       arcade: { debug: false },
     },
-    scene: [BootScene, MenuScene, GameScene],
+    scene: [
+      BootScene,
+      HubScene,
+      MenuScene,
+      GameScene,
+      MeteorMenuScene,
+      MeteorGameScene,
+    ],
     input: {
       activePointers: 3,
     },

@@ -1,4 +1,5 @@
 import {
+  CATCH_COOLDOWN_MS,
   CATCH_RANGE,
   DEFAULT_AI_COUNT,
   DEFAULT_CATCH_BUDGET,
@@ -10,20 +11,26 @@ import {
   POST_REVEAL_COUNTDOWN_MS,
   SEEKER_PREP_MS,
   START_SEQUENCE_MS,
+  STUN_PENALTY_BLIND_MS,
+  STUN_PENALTY_STUN_MS,
   type EntityState,
   type MatchConfig,
   type MatchMode,
   type MatchState,
   type PracticeRole,
+  type RoomRuleMode,
   type RoomSettings,
   type Winner,
 } from './types.js';
 import { createRng, pickRandom } from './rng.js';
 import { DEFAULT_MEADOW_SEED, newRoomMeadowSeed } from './meadowLayout.js';
 import {
+  applyDarknessSkill,
   attemptMissionTouch,
   checkMissionProximityCompletions,
   emptyMissionState,
+  KEY_HINT_CATCH,
+  tickDarkness,
   tickMission,
 } from './mission.js';
 
@@ -38,6 +45,7 @@ export function defaultConfig(overrides: Partial<MatchConfig> = {}): MatchConfig
     catchRange: CATCH_RANGE,
     seekerPrepMs: SEEKER_PREP_MS,
     foxMode: 'roulette',
+    ruleMode: 'standard',
     ...overrides,
   };
 }
@@ -55,6 +63,7 @@ export function createLobby(
     meadowSeed != null && Number.isFinite(meadowSeed)
       ? meadowSeed >>> 0
       : newRoomMeadowSeed(roomId);
+  const ruleMode: RoomRuleMode = config.ruleMode ?? 'standard';
   return {
     roomId,
     phase: 'lobby',
@@ -64,7 +73,8 @@ export function createLobby(
     humans: [],
     seekerId: null,
     entities: {},
-    catchBudgetRemaining: config.catchBudget,
+    catchBudgetRemaining: ruleMode === 'stun_penalty' ? 999 : config.catchBudget,
+    catchCooldownRemainingMs: 0,
     timeRemainingMs: config.timeLimitMs,
     seekerPrepRemainingMs: 0,
     startSequenceRemainingMs: 0,
@@ -73,21 +83,11 @@ export function createLobby(
     tick: 0,
     caughtHumans: [],
     meadowSeed: seed,
+    ruleMode,
+    seekerBlindRemainingMs: 0,
+    seekerStunRemainingMs: 0,
     ...emptyMissionState(),
   };
-}
-
-/** Number of human rabbits (hiders) for a lobby about to start with a given seeker. */
-export function humanHiderCount(humans: readonly string[], seekerId: string): number {
-  return humans.filter((id) => id !== seekerId).length;
-}
-
-/**
- * @deprecated Prefer host-configured config.catchBudget (total catches including AI).
- * Kept for tests that still reference the name — now returns host total N, not hider count.
- */
-export function catchBudgetForHumanHiders(hiderCount: number): number {
-  return Math.max(0, hiderCount);
 }
 
 /** Clamp host room options to safe ranges. */
@@ -96,12 +96,14 @@ export function normalizeRoomSettings(raw: Partial<RoomSettings>): RoomSettings 
   const timeLimitMs = Math.min(600_000, Math.max(30_000, Math.floor(raw.timeLimitMs ?? DEFAULT_TIME_LIMIT_MS)));
   const aiCount = Math.min(40, Math.max(0, Math.floor(raw.aiCount ?? DEFAULT_AI_COUNT)));
   const foxMode = raw.foxMode === 'designate' ? 'designate' : 'roulette';
-  return { catchBudget, timeLimitMs, aiCount, foxMode };
+  const ruleMode: RoomRuleMode = raw.ruleMode === 'stun_penalty' ? 'stun_penalty' : 'standard';
+  return { catchBudget, timeLimitMs, aiCount, foxMode, ruleMode };
 }
 
 /** Apply host room settings onto lobby config. */
 export function applyRoomSettings(state: MatchState, raw: Partial<RoomSettings>): MatchState {
   const s = normalizeRoomSettings(raw);
+  const ruleMode = s.ruleMode ?? 'standard';
   return {
     ...state,
     config: {
@@ -110,9 +112,14 @@ export function applyRoomSettings(state: MatchState, raw: Partial<RoomSettings>)
       timeLimitMs: s.timeLimitMs,
       aiCount: s.aiCount,
       foxMode: s.foxMode,
+      ruleMode,
     },
-    catchBudgetRemaining: s.catchBudget,
+    ruleMode,
+    catchBudgetRemaining: ruleMode === 'stun_penalty' ? 999 : s.catchBudget,
+    catchCooldownRemainingMs: 0,
     timeRemainingMs: s.timeLimitMs,
+    seekerBlindRemainingMs: 0,
+    seekerStunRemainingMs: 0,
   };
 }
 
@@ -157,7 +164,7 @@ export type JoinResult =
 
 export function canJoin(state: MatchState): boolean {
   if (state.phase === 'playing' || state.phase === 'starting') return false;
-  if (state.phase === 'ended') return state.humans.length < state.config.maxHumans;
+  // lobby or ended (rematch / rejoin seat)
   return state.humans.length < state.config.maxHumans;
 }
 
@@ -175,6 +182,7 @@ export function returnToLobby(state: MatchState): MatchState {
       vy: 0,
     };
   }
+  const ruleMode: RoomRuleMode = state.ruleMode ?? state.config?.ruleMode ?? 'standard';
   return {
     ...state,
     phase: 'lobby',
@@ -182,7 +190,8 @@ export function returnToLobby(state: MatchState): MatchState {
     practiceRole: null,
     seekerId: null,
     entities,
-    catchBudgetRemaining: state.config.catchBudget,
+    catchBudgetRemaining: ruleMode === 'stun_penalty' ? 999 : state.config.catchBudget,
+    catchCooldownRemainingMs: 0,
     timeRemainingMs: state.config.timeLimitMs,
     seekerPrepRemainingMs: 0,
     startSequenceRemainingMs: 0,
@@ -191,6 +200,9 @@ export function returnToLobby(state: MatchState): MatchState {
     tick: 0,
     caughtHumans: [],
     meadowSeed: state.meadowSeed ?? DEFAULT_MEADOW_SEED,
+    ruleMode,
+    seekerBlindRemainingMs: 0,
+    seekerStunRemainingMs: 0,
     ...emptyMissionState(),
   };
 }
@@ -303,6 +315,8 @@ export type StartOptions = {
   designatedSeekerId?: string;
   /** Override config.foxMode for this start. */
   foxMode?: import('./types.js').FoxAssignmentMode;
+  /** Override rule variant ('standard' | 'stun_penalty'). */
+  ruleMode?: RoomRuleMode;
 };
 
 /**
@@ -313,7 +327,6 @@ export function startMatch(state: MatchState, seedOrOpts: number | StartOptions 
     typeof seedOrOpts === 'number' ? { seed: seedOrOpts, mode: 'normal' } : seedOrOpts;
   const mode: MatchMode = opts.mode ?? 'normal';
   const seed = opts.seed ?? Date.now();
-
   let current = state;
   if (current.phase === 'ended') {
     current = returnToLobby(current);
@@ -325,8 +338,11 @@ export function startMatch(state: MatchState, seedOrOpts: number | StartOptions 
     throw new Error('startMatch: need at least 1 human');
   }
 
+  const ruleMode: RoomRuleMode =
+    opts.ruleMode ?? current.ruleMode ?? current.config.ruleMode ?? 'standard';
+
   if (mode === 'practice') {
-    return startPracticeMatch(current, seed, opts.practiceRole ?? 'rabbit');
+    return startPracticeMatch(current, seed, opts.practiceRole ?? 'rabbit', ruleMode);
   }
 
   // Normal hunt needs at least 2 humans (1 seeker + 1 hider); solo should use practice.
@@ -397,9 +413,14 @@ export function startMatch(state: MatchState, seedOrOpts: number | StartOptions 
       catchBudget,
       timeLimitMs: current.config.timeLimitMs,
       foxMode,
+      ruleMode,
     },
+    ruleMode,
+    seekerBlindRemainingMs: 0,
+    seekerStunRemainingMs: 0,
     entities,
-    catchBudgetRemaining: catchBudget,
+    catchBudgetRemaining: ruleMode === 'stun_penalty' ? 999 : catchBudget,
+    catchCooldownRemainingMs: 0,
     timeRemainingMs: current.config.timeLimitMs,
     seekerPrepRemainingMs: 0, // prep starts when playing begins
     startSequenceRemainingMs,
@@ -410,8 +431,14 @@ export function startMatch(state: MatchState, seedOrOpts: number | StartOptions 
     meadowSeed,
     // Arm missions after prep ends (hunt timer starts)
     mission: null,
+    missionResult: null,
     missionNextMs: -1,
     missionGrantCount: 0,
+    lastVisitPoint: null,
+    darknessChargeId: null,
+    darknessRemainingMs: 0,
+    foxSpeedBonus: 0,
+    foxMissionBuff: null,
   };
 }
 
@@ -424,6 +451,7 @@ export function startPracticeMatch(
   state: MatchState,
   seed: number = Date.now(),
   practiceRole: PracticeRole = 'rabbit',
+  ruleMode?: RoomRuleMode,
 ): MatchState {
   let current = state;
   if (current.phase === 'ended') {
@@ -436,6 +464,8 @@ export function startPracticeMatch(
     throw new Error('startPracticeMatch: need at least 1 human');
   }
 
+  const activeRule: RoomRuleMode =
+    ruleMode ?? current.ruleMode ?? current.config.ruleMode ?? 'standard';
   const rng = createRng(seed);
   const role: PracticeRole = practiceRole === 'fox' ? 'fox' : 'rabbit';
 
@@ -480,11 +510,15 @@ export function startPracticeMatch(
     phase: 'playing',
     mode: 'practice',
     practiceRole: role,
+    ruleMode: activeRule,
+    seekerBlindRemainingMs: 0,
+    seekerStunRemainingMs: 0,
     seekerId,
-    config: { ...current.config, aiCount: aiN },
+    config: { ...current.config, aiCount: aiN, ruleMode: activeRule },
     entities,
     // Unlimited practice catch attempts for fox mode
     catchBudgetRemaining: role === 'fox' ? 999 : current.config.catchBudget,
+    catchCooldownRemainingMs: 0,
     timeRemainingMs: current.config.timeLimitMs,
     seekerPrepRemainingMs: 0, // no prep in practice
     startSequenceRemainingMs: 0,
@@ -495,8 +529,14 @@ export function startPracticeMatch(
     caughtHumans: [],
     // Practice: arm sudden missions (same 10s → 30s → cooldown loop for testing)
     mission: null,
+    missionResult: null,
     missionNextMs: -1,
     missionGrantCount: 0,
+    lastVisitPoint: null,
+    darknessChargeId: null,
+    darknessRemainingMs: 0,
+    foxSpeedBonus: 0,
+    foxMissionBuff: null,
   };
 }
 
@@ -509,10 +549,11 @@ export function seekerPrepRemainingMs(state: MatchState): number {
   return Math.max(0, v);
 }
 
-/** Seeker cannot move or catch until prep elapses (normal mode only). */
+/** Seeker cannot move or catch until prep elapses (normal mode only), or while stunned. */
 export function canSeekerAct(state: MatchState, playerId: string): boolean {
   if (state.phase !== 'playing') return false;
   if (state.seekerId !== playerId) return false;
+  if ((state.seekerStunRemainingMs ?? 0) > 0) return false;
   // Practice fox: can hunt AI immediately (no prep)
   if (state.mode === 'practice') {
     return state.practiceRole === 'fox';
@@ -520,11 +561,19 @@ export function canSeekerAct(state: MatchState, playerId: string): boolean {
   return seekerPrepRemainingMs(state) <= 0;
 }
 
-/** Seeker vision of rabbit motion is blocked during prep. */
+/** True when the seeker is stunned (e.g. from catching AI in stun_penalty mode). */
+export function isSeekerStunned(state: MatchState, playerId?: string | null): boolean {
+  if ((state.seekerStunRemainingMs ?? 0) <= 0) return false;
+  if (playerId != null && state.seekerId !== playerId) return false;
+  return true;
+}
+
+/** Seeker vision of rabbit motion is blocked during prep or stun blindness. */
 export function canSeekerSee(state: MatchState, playerId: string): boolean {
-  if (state.mode === 'practice') return true;
   if (state.phase !== 'playing') return true;
   if (state.seekerId !== playerId) return true;
+  if ((state.seekerBlindRemainingMs ?? 0) > 0) return false;
+  if (state.mode === 'practice') return true;
   return seekerPrepRemainingMs(state) <= 0;
 }
 
@@ -559,8 +608,9 @@ export function isSeekerBlind(
   prepEndsAtMs: number | null = null,
 ): boolean {
   if (state.seekerId !== playerId) return false;
-  if (state.mode === 'practice') return false;
   if (state.phase !== 'playing') return false;
+  if ((state.seekerBlindRemainingMs ?? 0) > 0) return true;
+  if (state.mode === 'practice') return false;
   return effectivePrepRemainingMs(state, nowMs, prepEndsAtMs) > 0;
 }
 
@@ -585,10 +635,24 @@ export type CatchResult =
  * Pure helper so fox/rabbit clients always get different copy.
  */
 export function roleObjectiveLines(state: MatchState, you: string): string[] {
+  const isStunMode = (state.ruleMode ?? state.config?.ruleMode) === 'stun_penalty';
   if (state.mode === 'practice') {
     if (state.practiceRole === 'fox') {
+      if (isStunMode) {
+        const stunLines = [
+          '모드  무제한 스턴 연습',
+          '목표  AI 토끼 잡기 (무제한)',
+          '경고  AI를 잡으면 2초 암흑 + 5초 스턴!',
+          `조작  ${KEY_HINT_CATCH}`,
+        ];
+        if ((state.seekerStunRemainingMs ?? 0) > 0) {
+          stunLines.unshift(`💫 스턴 중! ${formatCatchCooldownSec(state.seekerStunRemainingMs)}초`);
+        }
+        return stunLines;
+      }
       return [
         '목표  AI 토끼를 가까이서 잡기',
+        `조작  ${KEY_HINT_CATCH}`,
         '안내  시간 제한 없음 · 연습용',
       ];
     }
@@ -611,6 +675,12 @@ export function roleObjectiveLines(state: MatchState, you: string): string[] {
   }
   if (state.phase === 'ended') {
     const users = humanCatchScore(state);
+    if (isStunMode) {
+      return [
+        '목표  결과 확인 후 다시하기',
+        `유저 포획  ${users}명 (무제한 모드)`,
+      ];
+    }
     const total = state.config.catchBudget;
     return [
       '목표  결과 확인 후 다시하기',
@@ -621,65 +691,118 @@ export function roleObjectiveLines(state: MatchState, you: string): string[] {
   if (isFox) {
     if (isSeekerPrepActive(state)) {
       return [
-        '목표  준비 시간 — 시야·이동 잠금',
-        `준비  ${Math.ceil(seekerPrepRemainingMs(state) / 1000)}초 후 사냥 시작`,
+        `준비 ${Math.ceil(seekerPrepRemainingMs(state) / 1000)}초 · 시야 잠금`,
+      ];
+    }
+    // Compact hunt lines + always-visible catch key
+    const lines = isStunMode
+      ? [
+          `잡기 무제한 · 유저 ${humanCatchScore(state)}명`,
+          `경고  AI 잡으면 2초 암흑+5초 스턴!`,
+          `조작  ${KEY_HINT_CATCH}`,
+        ]
+      : [
+          `잡기 ${state.catchBudgetRemaining}/${state.config.catchBudget} · 유저 ${humanCatchScore(state)}`,
+          `조작  ${KEY_HINT_CATCH}`,
+        ];
+    if ((state.seekerStunRemainingMs ?? 0) > 0) {
+      lines.unshift(`💫 스턴 해제까지 ${formatCatchCooldownSec(state.seekerStunRemainingMs)}초`);
+    } else {
+      const cd = state.catchCooldownRemainingMs ?? 0;
+      if (cd > 0) {
+        lines.push(`잡기 쿨 ${formatCatchCooldownSec(cd)}초`);
+      }
+    }
+    const bonus = state.foxSpeedBonus ?? 0;
+    if (bonus > 0) lines.push(`속도 보너스 +${bonus}`);
+    return lines;
+  }
+  // Rabbit (human hider) — show fox catch budget + hunt clock pressure
+  if (isSeekerPrepActive(state)) {
+    return [
+      `준비 ${Math.ceil(seekerPrepRemainingMs(state) / 1000)}초 · 숨기`,
+      isStunMode ? '여우 잡기  무제한 (AI 잡으면 스턴)' : `여우 잡기  ${state.catchBudgetRemaining}/${state.config.catchBudget}`,
+    ];
+  }
+  if (isStunMode) {
+    if ((state.seekerStunRemainingMs ?? 0) > 0) {
+      return [
+        `💫 술래 스턴 중! (${formatCatchCooldownSec(state.seekerStunRemainingMs)}초)`,
+        '술래가 AI를 잡아 멈췄습니다! 도망치세요!',
       ];
     }
     return [
-      '목표  제한 시간 안에 토끼를 잡으세요',
-      `잡기 횟수  ${state.catchBudgetRemaining}/${state.config.catchBudget} (AI·유저 공통)`,
-      `유저 포획  ${humanCatchScore(state)}명`,
+      '여우 잡기  무제한',
+      '힌트  AI 사이에 숨으세요! 술래가 AI 잡으면 5초 스턴',
     ];
   }
-  // Rabbit (human hider)
-  if (isSeekerPrepActive(state)) {
-    return [
-      '목표  술래 준비 중 — 자리를 섞어 숨으세요',
-      `준비  ${Math.ceil(seekerPrepRemainingMs(state) / 1000)}초`,
-    ];
-  }
+  const used = Math.max(
+    0,
+    state.config.catchBudget - state.catchBudgetRemaining,
+  );
+  // Mission/skill keys stay in missionHudLines; keep these always visible
   return [
-    '목표  여우에게 잡히지 말고 끝까지 버티기',
-    '안내  나무·바위 뒤로 숨고 거리를 유지하세요',
+    `여우 잡기  ${state.catchBudgetRemaining}/${state.config.catchBudget} (사용 ${used})`,
   ];
 }
 
 /** Test/helper: jump past roulette+countdown+prep into actionable hunt. */
 export function skipToPlaying(state: MatchState): MatchState {
+  // null = no more missions; undefined/-1 = arm first delay on next hunt tick
+  let missionNextMs: number | null;
+  if (state.mode !== 'normal') {
+    missionNextMs = null;
+  } else if (state.missionNextMs === null) {
+    missionNextMs = null;
+  } else if (state.missionNextMs === undefined || state.missionNextMs === -1) {
+    missionNextMs = -1;
+  } else {
+    missionNextMs = state.missionNextMs;
+  }
   return {
     ...state,
     phase: 'playing',
     startSequenceRemainingMs: 0,
     seekerPrepRemainingMs: 0,
-    // Ready for mission arming on next hunt tick (or keep existing)
-    missionNextMs:
-      state.mode === 'normal'
-        ? state.missionNextMs === null
-          ? null
-          : state.missionNextMs === undefined || state.missionNextMs === -1
-            ? -1
-            : state.missionNextMs
-        : null,
-    mission: state.mission ?? null,
-    missionGrantCount: state.missionGrantCount ?? 0,
+    missionNextMs,
   };
 }
 
-/** Rabbit Space / mission_action while playing. */
+/** @deprecated Prefer attemptMissionTouch — kept for existing tests/call sites. */
 export function applyMissionAction(state: MatchState, playerId: string): MatchState {
   return attemptMissionTouch(state, playerId);
 }
 
+/** @deprecated Prefer applyDarknessSkill — kept for existing tests/call sites. */
+export function applyDarknessAction(
+  state: MatchState,
+  playerId: string,
+): MatchState {
+  return applyDarknessSkill(state, playerId);
+}
+
 /** Short global toast line for a successful catch (all clients). */
-export function catchAnnounceText(detail: {
-  kind: CatchVictimKind;
-  name?: string;
-}): string {
+export function catchAnnounceText(
+  detail: {
+    kind: CatchVictimKind;
+    name?: string;
+  },
+  ruleMode?: RoomRuleMode,
+): string {
   if (detail.kind === 'ai') {
+    if (ruleMode === 'stun_penalty') {
+      return 'AI 토끼 오인! 2초 암흑 + 5초 스턴!';
+    }
     return '잡았다! AI 토끼';
   }
   const nick = (detail.name ?? '').trim() || '유저';
   return `잡았다! 유저 토끼 「${nick}」`;
+}
+
+/** Format remaining catch cooldown for HUD / overhead (e.g. "2.3"). */
+export function formatCatchCooldownSec(ms: number): string {
+  const t = Math.max(0, ms) / 1000;
+  return t.toFixed(1);
 }
 
 export function attemptCatch(state: MatchState, seekerId: string, targetId: string): CatchResult {
@@ -690,14 +813,22 @@ export function attemptCatch(state: MatchState, seekerId: string, targetId: stri
   if (state.mode === 'practice' && state.practiceRole !== 'fox') {
     return { ok: false, reason: 'practice_no_catch', state };
   }
-  if (!canSeekerAct(state, seekerId)) {
-    return { ok: false, reason: 'seeker_prep', state };
-  }
   if (state.seekerId !== seekerId) {
     return { ok: false, reason: 'not_seeker', state };
   }
-  // Total catch budget (AI + human) — no catches when exhausted in normal mode
-  if (state.mode === 'normal' && state.catchBudgetRemaining <= 0) {
+  if ((state.seekerStunRemainingMs ?? 0) > 0) {
+    return { ok: false, reason: 'seeker_stunned', state };
+  }
+  if (!canSeekerAct(state, seekerId)) {
+    return { ok: false, reason: 'seeker_prep', state };
+  }
+  // Min gap between successful catches
+  if ((state.catchCooldownRemainingMs ?? 0) > 0) {
+    return { ok: false, reason: 'catch_cooldown', state };
+  }
+  const isStunMode = (state.ruleMode ?? state.config?.ruleMode) === 'stun_penalty';
+  // Total catch budget (AI + human) — no catches when exhausted in standard normal mode
+  if (!isStunMode && state.mode === 'normal' && state.catchBudgetRemaining <= 0) {
     return { ok: false, reason: 'catch_budget_exhausted', state };
   }
 
@@ -721,8 +852,37 @@ export function attemptCatch(state: MatchState, seekerId: string, targetId: stri
   const catchX = target.x;
   const catchY = target.y;
 
-  // AI rabbit: spends 1 of total N catch attempts; no grave; not scored as user catch
+  // AI rabbit:
   if (target.kind === 'ai') {
+    if (isStunMode) {
+      // In stun_penalty mode:
+      // 1) Rabbit does NOT disappear (alive stays true)
+      // 2) Catch budget is unlimited (does not decrease)
+      // 3) Seeker screen turns dark for 2 seconds (2,000ms)
+      // 4) Seeker is stunned for 5 seconds (5,000ms) unable to move or catch
+      const entities = {
+        ...state.entities,
+        [seekerId]: { ...seeker, vx: 0, vy: 0 },
+      };
+      const next: MatchState = {
+        ...state,
+        entities,
+        seekerBlindRemainingMs: STUN_PENALTY_BLIND_MS,
+        seekerStunRemainingMs: STUN_PENALTY_STUN_MS,
+        catchCooldownRemainingMs: STUN_PENALTY_STUN_MS,
+      };
+      return {
+        ok: true,
+        state: next,
+        caughtId: targetId,
+        kind: 'ai',
+        name: target.name || 'AI',
+        x: catchX,
+        y: catchY,
+        placeGrave: false,
+      };
+    }
+
     const entities = {
       ...state.entities,
       [targetId]: { ...target, alive: false, vx: 0, vy: 0 },
@@ -732,6 +892,7 @@ export function attemptCatch(state: MatchState, seekerId: string, targetId: stri
       ...state,
       entities,
       catchBudgetRemaining: budget,
+      catchCooldownRemainingMs: CATCH_COOLDOWN_MS,
     };
     if (state.mode === 'normal') {
       next = evaluateEndConditions(next);
@@ -753,8 +914,10 @@ export function attemptCatch(state: MatchState, seekerId: string, targetId: stri
     return { ok: false, reason: 'practice_ai_only', state };
   }
 
-  // Successful human catch spends 1 budget and records the victim (user score)
-  const budget = state.catchBudgetRemaining - 1;
+  // Successful human catch spends 1 budget in standard; unlimited in stun mode
+  const budget = isStunMode
+    ? state.catchBudgetRemaining
+    : state.catchBudgetRemaining - 1;
   const victimName = target.name || targetId;
   const entities = {
     ...state.entities,
@@ -768,6 +931,7 @@ export function attemptCatch(state: MatchState, seekerId: string, targetId: stri
     ...state,
     entities,
     catchBudgetRemaining: budget,
+    catchCooldownRemainingMs: CATCH_COOLDOWN_MS,
     caughtHumans,
   };
   next = evaluateEndConditions(next);
@@ -817,15 +981,25 @@ export function tickTimer(state: MatchState, dtMs: number): MatchState {
     };
   }
 
+  const seekerBlind = Math.max(0, (state.seekerBlindRemainingMs ?? 0) - dtMs);
+  const seekerStun = Math.max(0, (state.seekerStunRemainingMs ?? 0) - dtMs);
+
   // Practice: no timed win/lose — AI + mission loop for testing
   if (state.mode === 'practice') {
     if (state.humans.length === 0) {
       return createLobby(state.roomId, state.config);
     }
-    let next = { ...state, tick: state.tick + 1 };
+    let next = {
+      ...state,
+      tick: state.tick + 1,
+      catchCooldownRemainingMs: Math.max(0, (state.catchCooldownRemainingMs ?? 0) - dtMs),
+      seekerBlindRemainingMs: seekerBlind,
+      seekerStunRemainingMs: seekerStun,
+    };
     // Same mission schedule as multi (10s first, 30s duration, 30s cooldown loop)
     next = tickMission(next, dtMs);
     next = checkMissionProximityCompletions(next);
+    next = tickDarkness(next, dtMs);
     // Fox practice: if all AI rabbits are down, spawn a fresh pack
     if (next.practiceRole === 'fox') {
       const aliveAi = Object.values(next.entities).filter((e) => e.kind === 'ai' && e.alive);
@@ -848,10 +1022,14 @@ export function tickTimer(state: MatchState, dtMs: number): MatchState {
     ...state,
     timeRemainingMs,
     tick: state.tick + 1,
+    catchCooldownRemainingMs: Math.max(0, (state.catchCooldownRemainingMs ?? 0) - dtMs),
+    seekerBlindRemainingMs: seekerBlind,
+    seekerStunRemainingMs: seekerStun,
   };
   // Hunt clock running → sudden missions (10s first delay, 30s each, loop rules)
   next = tickMission(next, dtMs);
   next = checkMissionProximityCompletions(next);
+  next = tickDarkness(next, dtMs);
   return evaluateEndConditions(next);
 }
 
@@ -863,8 +1041,11 @@ export function setEntityVelocity(
 ): MatchState {
   const e = state.entities[entityId];
   if (!e || !e.alive) return state;
-  // Seeker locked during prep
-  if (state.seekerId === entityId && isSeekerPrepActive(state)) {
+  // Seeker locked during prep or stun
+  if (
+    state.seekerId === entityId &&
+    (isSeekerPrepActive(state) || (state.seekerStunRemainingMs ?? 0) > 0)
+  ) {
     return state;
   }
   return {
@@ -887,8 +1068,11 @@ export function integrateMotion(state: MatchState, dtSec: number): MatchState {
       entities[id] = e;
       continue;
     }
-    // Freeze seeker position during prep even if velocity was set
-    if (state.seekerId === id && isSeekerPrepActive(state)) {
+    // Freeze seeker position during prep or stun even if velocity was set
+    if (
+      state.seekerId === id &&
+      (isSeekerPrepActive(state) || (state.seekerStunRemainingMs ?? 0) > 0)
+    ) {
       entities[id] = { ...e, vx: 0, vy: 0 };
       continue;
     }
@@ -935,7 +1119,8 @@ export function evaluateEndConditions(state: MatchState): MatchState {
     return endMatch(state, 'hiders', 'time_expired');
   }
 
-  if (state.catchBudgetRemaining <= 0) {
+  const isStunMode = (state.ruleMode ?? state.config?.ruleMode) === 'stun_penalty';
+  if (!isStunMode && state.catchBudgetRemaining <= 0) {
     return endMatch(state, 'hiders', 'catch_budget_exhausted');
   }
 

@@ -1,16 +1,33 @@
 import type { EntityState, MatchPhase, MatchState } from '@hide-and-seek/shared';
 
+/** Prefix for rabbits who hold an unused darkness skill charge (left of nick). */
+export const DARKNESS_SKILL_ICON = '🌑';
+
 /**
  * Overhead name plate text.
  * - During play: fox never sees rabbit nicknames (fairness).
  * - After match ends: everyone sees human nicknames (+ 생존/잡힘); AI labeled "AI".
+ * - Skill holders (darkness charge) get an icon left of the nick for rabbits only.
  */
 export function nameTagLabel(
   e: EntityState,
   you: string | null,
   seekerId: string | null,
   phase: MatchPhase = 'playing',
+  opts?: {
+    hasDarknessSkill?: boolean;
+    isStunned?: boolean;
+    stunRemainingMs?: number;
+  },
 ): string {
+  const isFox = seekerId != null && (e.id === seekerId || e.role === 'seeker');
+  if (phase === 'playing' && isFox && opts?.isStunned && (opts.stunRemainingMs ?? 0) > 0) {
+    const sec = ((opts.stunRemainingMs ?? 0) / 1000).toFixed(1);
+    return `술래 💫 스턴 (${sec}초)`;
+  }
+  const skillPrefix =
+    opts?.hasDarknessSkill && phase !== 'ended' ? `${DARKNESS_SKILL_ICON} ` : '';
+
   if (phase === 'ended') {
     if (e.kind === 'ai') return 'AI';
     const nick = (e.name ?? '').trim() || '유저';
@@ -21,12 +38,21 @@ export function nameTagLabel(
 
   if (e.kind === 'ai') return '';
   const nick = (e.name ?? '').trim();
-  if (e.id === you) return nick || '나';
-  // Fox must not read rabbit nicknames above heads during the hunt
+  if (e.id === you) return `${skillPrefix}${nick || '나'}`;
+  // Fox must not read rabbit nicknames (or skill icons) above heads during the hunt
   if (you != null && seekerId != null && seekerId === you) return '';
-  if (seekerId != null && (e.id === seekerId || e.role === 'seeker')) return '술래';
-  // User rabbits can see each other's nicknames
-  return nick || '유저';
+  if (isFox) return '술래';
+  // User rabbits can see each other's nicknames + skill icon
+  return `${skillPrefix}${nick || '유저'}`;
+}
+
+/** 0..1 remaining fraction of catch cooldown (1 = full cool, 0 = ready). */
+export function catchCooldownProgress(
+  remainingMs: number,
+  totalMs: number,
+): number {
+  if (totalMs <= 0) return 0;
+  return Math.min(1, Math.max(0, remainingMs / totalMs));
 }
 
 export type UserRabbitSummary = {

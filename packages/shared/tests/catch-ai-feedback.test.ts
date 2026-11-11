@@ -81,7 +81,13 @@ describe('multiplayer AI + human catch feedback', () => {
     const foxLines = roleObjectiveLines(skipToPlaying(state), seekerId);
     const rabbitLines = roleObjectiveLines(skipToPlaying(state), hiderId);
     expect(foxLines.join('\n')).not.toBe(rabbitLines.join('\n'));
-    expect(foxLines.some((l) => l.includes('잡') || l.includes('토끼'))).toBe(true);
-    expect(rabbitLines.some((l) => l.includes('버티') || l.includes('숨'))).toBe(true);
+    expect(foxLines.some((l) => l.includes('잡') || l.includes('유저'))).toBe(true);
+    expect(foxLines.some((l) => l.includes('[Space]') && l.includes('잡기'))).toBe(
+      true,
+    );
+    // Fox has catch key; rabbits see fox catch budget remaining/total
+    expect(foxLines.length).toBeGreaterThan(0);
+    expect(rabbitLines.some((l) => l.includes('여우 잡기'))).toBe(true);
+    expect(rabbitLines.some((l) => /\d+\/\d+/.test(l))).toBe(true);
   });
 });

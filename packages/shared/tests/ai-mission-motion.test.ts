@@ -12,10 +12,12 @@ import {
   joinHuman,
   MISSION_VISIT_RADIUS,
   resetAiBrains,
+  shouldRelockDir,
   skipToPlaying,
   startMatch,
   stepAiCrowd,
 } from '../src/index.js';
+import type { AiBrain } from '../src/ai.js';
 
 function huntWithVisit(seed = 21, aiCount = 12) {
   let lobby = createLobby('vis', defaultConfig({ aiCount, seekerPrepMs: 0 }));
@@ -32,6 +34,7 @@ function huntWithVisit(seed = 21, aiCount = 12) {
       targetX: 900,
       targetY: 500,
       completedIds: [],
+        skipIds: [],
     },
   };
   return state;
@@ -65,6 +68,84 @@ function simulateVisitMission(ticks: number, seed = 21, stepMs = 200) {
   }
   return state;
 }
+
+describe('AI thrash / freeze guards', () => {
+  beforeEach(() => {
+    resetAiBrains();
+  });
+
+  it('shouldRelockDir always relocks when close to goal (prevents L↔R hold thrash)', () => {
+    const brain = {
+      dirNx: 1,
+      dirNy: 0,
+      dirHoldMs: 800,
+    } as AiBrain;
+    // Close + opposite preferred → must relock
+    expect(shouldRelockDir(brain, { nx: -1, ny: 0 }, -30, 0, 30)).toBe(true);
+    // Same dir held far away: keep hold
+    expect(
+      shouldRelockDir(
+        { ...brain, dirHoldMs: 800 } as AiBrain,
+        { nx: 1, ny: 0 },
+        200,
+        0,
+        200,
+      ),
+    ).toBe(false);
+  });
+
+  it('during visit mission AI rarely stay still or reverse velocity each tick', () => {
+    let state = huntWithVisit(55, 14);
+    const m = state.mission!;
+    const entities = { ...state.entities };
+    let i = 0;
+    for (const [id, e] of Object.entries(entities)) {
+      if (e.kind !== 'ai') continue;
+      // Cluster near the point — classic thrash zone
+      entities[id] = {
+        ...e,
+        x: m.targetX + (i % 4) * 18 - 30,
+        y: m.targetY + Math.floor(i / 4) * 18 - 30,
+        vx: 0,
+        vy: 0,
+      };
+      i += 1;
+    }
+    state = { ...state, entities };
+    resetAiBrains(state.roomId);
+
+    const prevVel = new Map<string, { vx: number; vy: number; x: number; y: number }>();
+    let reverseFlips = 0;
+    let stillTicks = 0;
+    let samples = 0;
+
+    for (let t = 0; t < 80; t++) {
+      state = stepAiCrowd(state, 50, t + 3);
+      state = integrateMotion(state, 0.05);
+      state = checkMissionProximityCompletions(state);
+      state = { ...state, tick: state.tick + 1 };
+
+      for (const e of Object.values(state.entities)) {
+        if (e.kind !== 'ai' || !e.alive) continue;
+        samples += 1;
+        const mag = Math.hypot(e.vx, e.vy);
+        if (mag < 1) stillTicks += 1;
+        const prev = prevVel.get(e.id);
+        if (prev && mag > 1 && Math.hypot(prev.vx, prev.vy) > 1) {
+          // ~180° reverse between consecutive ticks
+          const dot = e.vx * prev.vx + e.vy * prev.vy;
+          if (dot < -AI_SPEED * AI_SPEED * 0.5) reverseFlips += 1;
+        }
+        prevVel.set(e.id, { vx: e.vx, vy: e.vy, x: e.x, y: e.y });
+      }
+    }
+
+    // Should almost never freeze mid-mission (allow tiny fraction of idle edge cases)
+    expect(stillTicks / samples).toBeLessThan(0.08);
+    // Direction flips should be rare, not thrash every tick near the point
+    expect(reverseFlips / samples).toBeLessThan(0.12);
+  });
+});
 
 describe('AI visit_point mission motion', () => {
   beforeEach(() => {

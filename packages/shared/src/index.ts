@@ -6,3 +6,5 @@ export * from './meadowLayout.js';
 export * from './mobile.js';
 export * from './facing.js';
 export * from './mission.js';
+export * from './hostSim.js';
+export * from './meteorSurvival.js';

@@ -26,6 +26,9 @@ export class BootScene extends Phaser.Scene {
     }
     this.load.image('hider_rabbit', '/assets/meadow/hider_rabbit.png');
     this.load.image('seeker_fox', '/assets/meadow/seeker_fox.png');
+    // 운석 피하기 (닷지) — Imagine-generated sprites
+    this.load.image('dodge_ship', '/assets/dodge/ship.png');
+    this.load.image('dodge_meteor', '/assets/dodge/meteor.png');
   }
 
   create(): void {
@@ -50,11 +53,13 @@ export class BootScene extends Phaser.Scene {
     this.ensureFallback('prop_tree', 128, 0x2e7d32);
     this.ensureFallback('prop_rock', 80, 0x7f8c8d);
     this.ensureFallback('caught', 64, 0x95a5a6);
+    this.ensureFallbackShip('dodge_ship', 64);
+    this.ensureFallbackMeteor('dodge_meteor', 48);
 
     // --- Phaser Animation Manager (idle + run loops) ---
     this.registerAnimalAnims();
 
-    this.scene.start('Menu');
+    this.scene.start('Hub');
   }
 
   private registerAnimalAnims(): void {
@@ -98,6 +103,33 @@ export class BootScene extends Phaser.Scene {
     const g = this.make.graphics({ x: 0, y: 0 });
     g.fillStyle(color, 1);
     g.fillCircle(size / 2, size / 2, size / 2 - 2);
+    g.generateTexture(key, size, size);
+    g.destroy();
+  }
+
+  /** Placeholder cyan ship if dodge asset fails to load. */
+  private ensureFallbackShip(key: string, size: number): void {
+    if (this.textures.exists(key)) return;
+    const g = this.make.graphics({ x: 0, y: 0 });
+    const c = size / 2;
+    g.fillStyle(0x38bdf8, 1);
+    g.fillTriangle(c, 4, 8, size - 6, size - 8, size - 6);
+    g.fillStyle(0xe0f2fe, 1);
+    g.fillCircle(c, c - 2, 5);
+    g.generateTexture(key, size, size);
+    g.destroy();
+  }
+
+  /** Placeholder rock if dodge meteor asset fails to load. */
+  private ensureFallbackMeteor(key: string, size: number): void {
+    if (this.textures.exists(key)) return;
+    const g = this.make.graphics({ x: 0, y: 0 });
+    const c = size / 2;
+    g.fillStyle(0x64748b, 1);
+    g.fillCircle(c, c, c - 3);
+    g.fillStyle(0xf59e0b, 1);
+    g.fillCircle(c - 6, c + 2, 4);
+    g.fillCircle(c + 5, c - 4, 3);
     g.generateTexture(key, size, size);
     g.destroy();
   }

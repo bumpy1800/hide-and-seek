@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import {
   DEFAULT_MEADOW_SEED,
+  CATCH_COOLDOWN_MS,
   MAP_HEIGHT,
   MAP_WIDTH,
   SEEKER_PREP_MS,
@@ -13,6 +14,7 @@ import {
   ENTITY_COLLIDE_RADIUS,
   SEEKER_SPEED,
   RABBIT_SPEED,
+  seekerMoveSpeed,
   FACING_IDLE_EPS,
   facingFromVelocity,
   animalAnimKey,
@@ -38,13 +40,18 @@ import { LocalPracticeHost } from '../net/LocalPracticeHost';
 import { PeerMultiplayer } from '../net/PeerMultiplayer';
 import { normalizeRoomCode } from '../net/roomCodes';
 import { loadNickname, saveNickname } from '../net/nicknames';
+import { teardownSessionHosts } from '../net/sessionTeardown';
 import { getWsUrl, preferPeerMultiplayer } from '../config';
 import {
   buildMeadowWorld,
   destroyMeadowWorld,
   type MeadowWorld,
 } from '../world/MeadowMap';
-import { nameTagLabel, userRabbitRevealLines } from '../ui/nameTags';
+import {
+  catchCooldownProgress,
+  nameTagLabel,
+  userRabbitRevealLines,
+} from '../ui/nameTags';
 
 export type PeerRole = 'host' | 'guest';
 
@@ -68,12 +75,21 @@ export class GameScene extends Phaser.Scene {
   private entityGroup!: Phaser.Physics.Arcade.Group;
   private sprites = new Map<string, Phaser.GameObjects.Sprite>();
   private nameTags = new Map<string, Phaser.GameObjects.Text>();
+  /** Soft ring under local rabbit so you can spot yourself in a crowd. */
+  private localRing: Phaser.GameObjects.Arc | null = null;
+  /** Fox catch cooldown progress bar (world space above seeker). */
+  private catchCdBg: Phaser.GameObjects.Rectangle | null = null;
+  private catchCdFill: Phaser.GameObjects.Rectangle | null = null;
   private hudPanel!: Phaser.GameObjects.Graphics;
   private hudTitle!: Phaser.GameObjects.Text;
   private hudBody!: Phaser.GameObjects.Text;
   private statusText!: Phaser.GameObjects.Text;
   private modeBadge!: Phaser.GameObjects.Text;
   private startBtn!: Phaser.GameObjects.Container;
+  /** Leave match / return to main menu without page refresh. */
+  private lobbyBackBtn!: Phaser.GameObjects.Container;
+  /** Host: ended → room waiting lobby (keep room, no rematch). */
+  private roomLobbyBtn!: Phaser.GameObjects.Container;
   private prepOverlay!: Phaser.GameObjects.Rectangle;
   private prepLabel!: Phaser.GameObjects.Text;
   private you: string | null = null;
@@ -83,7 +99,7 @@ export class GameScene extends Phaser.Scene {
   private practiceRole: PracticeRole = 'rabbit';
   private peerRole: PeerRole = 'host';
   private joinRoomCode = '';
-  private playerName = loadNickname();
+  private playerName = loadNickname('hide-and-seek');
   private lastMoveSent = { dx: 0, dy: 0 };
   private cameraFollowId: string | null = null;
   private autoStarted = false;
@@ -110,6 +126,9 @@ export class GameScene extends Phaser.Scene {
   private missionMarkerLabel: Phaser.GameObjects.Text | null = null;
   /** Top-center sudden-mission banner (fox + rabbits). */
   private missionBanner!: Phaser.GameObjects.Text;
+  /** Mission 1st-place darkness skill — full screen blackout for everyone. */
+  private darknessOverlay!: Phaser.GameObjects.Rectangle;
+  private darknessLabel!: Phaser.GameObjects.Text;
 
   constructor() {
     super('Game');
@@ -122,7 +141,9 @@ export class GameScene extends Phaser.Scene {
     this.joinRoomCode = (data.roomCode ?? '').trim();
     this.roomSettings = data.roomSettings ?? null;
     this.playerName = saveNickname(
-      (data.playerName ?? loadNickname()).trim() || loadNickname(),
+      (data.playerName ?? loadNickname('hide-and-seek')).trim() ||
+        loadNickname('hide-and-seek'),
+      'hide-and-seek',
     );
     // Unique practice room so solo practice never collides with others / leftover state
     this.roomId =
@@ -138,6 +159,7 @@ export class GameScene extends Phaser.Scene {
     this.client = null;
     this.localPractice = null;
     this.peer = null;
+    this.leavingToMenu = false;
     this.clearGraves();
     this.graveIds.clear();
   }
@@ -157,64 +179,85 @@ export class GameScene extends Phaser.Scene {
     this.cameras.main.setBounds(0, 0, MAP_WIDTH, MAP_HEIGHT);
     this.cameras.main.setBackgroundColor('#5d8a3e');
 
-    // Left HUD — glass panel with Korean labels
+    // Left HUD — compact translucent panel (must not cover play center)
     this.hudPanel = this.add.graphics().setScrollFactor(0).setDepth(1999);
     const hudFont =
       'system-ui, -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif';
     this.hudTitle = this.add
-      .text(28, 22, '초원 숨바꼭질', {
+      .text(20, 14, 'AI 술래잡기', {
         fontFamily: hudFont,
-        fontSize: '20px',
+        fontSize: '15px',
         color: '#fff8e7',
         fontStyle: 'bold',
       })
       .setScrollFactor(0)
       .setDepth(2000)
-      .setShadow(0, 2, '#000000aa', 4, false, true);
+      .setAlpha(0.92);
     this.hudBody = this.add
-      .text(28, 52, '연결 중…', {
+      .text(20, 36, '연결 중…', {
         fontFamily: hudFont,
-        fontSize: '15px',
+        fontSize: '12px',
         color: '#e8eef5',
-        lineSpacing: 7,
+        lineSpacing: 4,
       })
       .setScrollFactor(0)
       .setDepth(2000)
-      .setShadow(0, 1, '#00000088', 3, false, true);
-    this.drawHudPanel(320, 120);
+      .setAlpha(0.9);
+    this.drawHudPanel(220, 72);
 
+    // Status: top-left under HUD strip, small — not center (blocked view)
     this.statusText = this.add
-      .text(width / 2, 22, '연결 중…', {
+      .text(16, height - 28, '연결 중…', {
         fontFamily: hudFont,
-        fontSize: '17px',
+        fontSize: '12px',
         color: '#ffe08a',
         fontStyle: 'bold',
-        align: 'center',
-        backgroundColor: '#0b1020cc',
-        padding: { x: 14, y: 8 },
+        align: 'left',
+        backgroundColor: '#0b102088',
+        padding: { x: 8, y: 4 },
       })
-      .setOrigin(0.5, 0)
+      .setOrigin(0, 1)
       .setScrollFactor(0)
       .setDepth(2000)
-      .setShadow(0, 1, '#00000066', 2, false, true);
+      .setAlpha(0.85);
 
-    // Sudden mission — top center (highly visible to fox and rabbits)
+    // Sudden mission — top center, highly visible
     this.missionBanner = this.add
-      .text(width / 2, 56, '', {
+      .text(width / 2, 10, '', {
         fontFamily: hudFont,
-        fontSize: '22px',
+        fontSize: '20px',
         color: '#ffe08a',
         fontStyle: 'bold',
         align: 'center',
-        backgroundColor: '#7a1f1fcc',
-        padding: { x: 18, y: 12 },
-        lineSpacing: 8,
+        backgroundColor: '#7a1f1cee',
+        padding: { x: 16, y: 10 },
+        lineSpacing: 6,
+        wordWrap: { width: Math.min(720, width - 48) },
       })
       .setOrigin(0.5, 0)
       .setScrollFactor(0)
       .setDepth(2500)
       .setVisible(false)
-      .setShadow(0, 2, '#000000aa', 4, false, true);
+      .setAlpha(1);
+
+    // Darkness skill (mission 1st place K) — cover every player's screen
+    this.darknessOverlay = this.add
+      .rectangle(width / 2, height / 2, width + 4, height + 4, 0x000000, 1)
+      .setScrollFactor(0)
+      .setDepth(3200)
+      .setVisible(false);
+    this.darknessLabel = this.add
+      .text(width / 2, height / 2, '암흑', {
+        fontFamily: hudFont,
+        fontSize: '28px',
+        color: '#4a4a4a',
+        fontStyle: 'bold',
+        align: 'center',
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(3201)
+      .setVisible(false);
 
     // Seeker prep blackout — obscures world so rabbit motion is not visible
     this.prepOverlay = this.add
@@ -256,27 +299,90 @@ export class GameScene extends Phaser.Scene {
       .setVisible(false)
       .setShadow(0, 3, '#000000', 8, false, true);
 
-    const btnBg = this.add.rectangle(0, 0, 220, 54, 0x27ae60, 0.96);
-    btnBg.setStrokeStyle(2, 0xa8e6cf, 0.7);
+    // Bottom UI — high depth + hit on the rect itself (containers often miss clicks)
+    const btnDepth = 4500;
+    const btnBg = this.add
+      .rectangle(width / 2 + 110, height - 56, 200, 50, 0x27ae60, 0.96)
+      .setStrokeStyle(2, 0xa8e6cf, 0.7)
+      .setScrollFactor(0)
+      .setDepth(btnDepth)
+      .setInteractive({ useHandCursor: true });
     const btnLabel = this.add
-      .text(0, 0, '시작', {
+      .text(width / 2 + 110, height - 56, '시작', {
         fontFamily: hudFont,
-        fontSize: '22px',
+        fontSize: '20px',
         color: '#ffffff',
         fontStyle: 'bold',
       })
-      .setOrigin(0.5);
-    this.startBtn = this.add
-      .container(width / 2, height - 56, [btnBg, btnLabel])
+      .setOrigin(0.5)
       .setScrollFactor(0)
-      .setDepth(2001)
-      .setSize(220, 54)
-      .setInteractive(
-        new Phaser.Geom.Rectangle(-110, -27, 220, 54),
-        Phaser.Geom.Rectangle.Contains,
-      );
-    this.startBtn.on('pointerdown', () => this.requestStart());
+      .setDepth(btnDepth + 1);
+    btnBg.on('pointerdown', (_p: Phaser.Input.Pointer, _x: number, _y: number, ev: Phaser.Types.Input.EventData) => {
+      ev?.stopPropagation?.();
+      this.requestStart();
+    });
+    this.startBtn = this.add
+      .container(0, 0, [btnBg, btnLabel])
+      .setScrollFactor(0)
+      .setDepth(btnDepth);
     this.startBtn.setData('label', btnLabel);
+    this.startBtn.setData('bg', btnBg);
+
+    const lobbyBg = this.add
+      .rectangle(width / 2 - 110, height - 56, 200, 50, 0x4a5568, 0.96)
+      .setStrokeStyle(2, 0xcbd5e1, 0.55)
+      .setScrollFactor(0)
+      .setDepth(btnDepth)
+      .setInteractive({ useHandCursor: true });
+    const lobbyLabel = this.add
+      .text(width / 2 - 110, height - 56, '스낵게임 홈', {
+        fontFamily: hudFont,
+        fontSize: '18px',
+        color: '#ffffff',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(btnDepth + 1);
+    lobbyBg.on('pointerdown', (_p: Phaser.Input.Pointer, _x: number, _y: number, ev: Phaser.Types.Input.EventData) => {
+      ev?.stopPropagation?.();
+      this.requestReturnToMenu();
+    });
+    this.lobbyBackBtn = this.add
+      .container(0, 0, [lobbyBg, lobbyLabel])
+      .setScrollFactor(0)
+      .setDepth(btnDepth);
+    this.lobbyBackBtn.setData('bg', lobbyBg);
+    this.lobbyBackBtn.setData('label', lobbyLabel);
+
+    const roomBg = this.add
+      .rectangle(width / 2, height - 112, 180, 44, 0x2c5282, 0.96)
+      .setStrokeStyle(2, 0x90cdf4, 0.55)
+      .setScrollFactor(0)
+      .setDepth(btnDepth)
+      .setInteractive({ useHandCursor: true })
+      .setVisible(false);
+    const roomLabel = this.add
+      .text(width / 2, height - 112, '대기실로', {
+        fontFamily: hudFont,
+        fontSize: '17px',
+        color: '#ffffff',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(btnDepth + 1)
+      .setVisible(false);
+    roomBg.on('pointerdown', (_p: Phaser.Input.Pointer, _x: number, _y: number, ev: Phaser.Types.Input.EventData) => {
+      ev?.stopPropagation?.();
+      this.requestReturnToRoomLobby();
+    });
+    this.roomLobbyBtn = this.add
+      .container(0, 0, [roomBg, roomLabel])
+      .setScrollFactor(0)
+      .setDepth(btnDepth);
+    this.roomLobbyBtn.setData('bg', roomBg);
+    this.roomLobbyBtn.setData('label', roomLabel);
 
     this.inputCtl = new IntentInput(this);
 
@@ -319,15 +425,52 @@ export class GameScene extends Phaser.Scene {
     this.events.on(Phaser.Scenes.Events.POST_UPDATE, this.resyncAuthorityPositions, this);
 
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
-      this.events.off(Phaser.Scenes.Events.POST_UPDATE, this.resyncAuthorityPositions, this);
-      this.solidCollider?.destroy();
+      try {
+        this.events.off(Phaser.Scenes.Events.POST_UPDATE, this.resyncAuthorityPositions, this);
+      } catch {
+        /* ignore */
+      }
+      try {
+        this.solidCollider?.destroy();
+      } catch {
+        /* ignore */
+      }
       this.solidCollider = null;
-      destroyMeadowWorld(this.meadow);
-      this.inputCtl.destroy();
-      this.client?.close();
-      this.localPractice?.stop();
-      this.peer?.destroy();
-      this.clearGraves();
+      try {
+        destroyMeadowWorld(this.meadow);
+      } catch {
+        /* ignore */
+      }
+      try {
+        this.inputCtl?.destroy();
+      } catch {
+        /* ignore */
+      }
+      // Hosts may already be torn down in requestReturnToMenu — never double-block
+      try {
+        this.localPractice?.stop();
+      } catch {
+        /* ignore */
+      }
+      this.localPractice = null;
+      try {
+        this.client?.close();
+      } catch {
+        /* ignore */
+      }
+      this.client = null;
+      try {
+        this.peer?.softDisconnect?.();
+        this.peer?.destroy?.();
+      } catch {
+        /* ignore */
+      }
+      this.peer = null;
+      try {
+        this.clearGraves();
+      } catch {
+        /* ignore */
+      }
     });
   }
 
@@ -387,11 +530,17 @@ export class GameScene extends Phaser.Scene {
 
   private syncMissionMarker(state: MatchState): void {
     const m = state.mission;
+    // Fox must not see visit_point location — rabbits (and practice rabbit) only
+    const you = this.you;
+    const isFoxViewer =
+      you != null &&
+      (state.seekerId === you || state.practiceRole === 'fox');
     const show =
       state.phase === 'playing' &&
       (state.mode === 'normal' || state.mode === 'practice') &&
       m != null &&
-      m.kind === 'visit_point';
+      m.kind === 'visit_point' &&
+      !isFoxViewer;
     if (!show) {
       this.missionMarker?.setVisible(false);
       this.missionMarkerLabel?.setVisible(false);
@@ -399,19 +548,20 @@ export class GameScene extends Phaser.Scene {
     }
     if (!this.missionMarker) {
       this.missionMarker = this.add
-        .circle(m!.targetX, m!.targetY, MISSION_VISIT_RADIUS, 0xffe08a, 0.22)
-        .setStrokeStyle(3, 0xffc107, 0.95)
+        .circle(m!.targetX, m!.targetY, MISSION_VISIT_RADIUS, 0xffe08a, 0.1)
+        .setStrokeStyle(2, 0xffc107, 0.55)
         .setDepth(6);
       this.missionMarkerLabel = this.add
-        .text(m!.targetX, m!.targetY - MISSION_VISIT_RADIUS - 12, '미션 지점', {
-          fontSize: '14px',
+        .text(m!.targetX, m!.targetY - MISSION_VISIT_RADIUS - 10, '미션', {
+          fontSize: '11px',
           color: '#fff8e7',
           fontStyle: 'bold',
-          backgroundColor: '#00000099',
-          padding: { x: 6, y: 3 },
+          backgroundColor: '#00000066',
+          padding: { x: 4, y: 2 },
         })
         .setOrigin(0.5)
-        .setDepth(7);
+        .setDepth(7)
+        .setAlpha(0.85);
     }
     this.missionMarker.setPosition(m!.targetX, m!.targetY).setVisible(true);
     this.missionMarkerLabel
@@ -420,15 +570,83 @@ export class GameScene extends Phaser.Scene {
   }
 
   private syncMissionBanner(state: MatchState): void {
-    const lines = missionBannerLines(state);
+    // Pass local player: fox must not see skill-holder; rabbits get full lines
+    const lines = missionBannerLines(state, this.you ?? undefined);
     if (!lines) {
       this.missionBanner.setVisible(false);
       return;
     }
     this.missionBanner.setText(lines.join('\n'));
     this.missionBanner.setVisible(true);
-    // Keep centered if scale changed
-    this.missionBanner.setPosition(this.scale.width / 2, 56);
+    // Top-center — large enough to notice mission start
+    const wrapW = Math.min(720, this.scale.width - 48);
+    this.missionBanner.setPosition(this.scale.width / 2, 10);
+    this.missionBanner.setOrigin(0.5, 0);
+    const chargeAnnounce = lines.some((l) => l.includes('암흑'));
+    const foxBuffAnnounce = lines.some((l) => l.includes('여우 강화'));
+    const endAnnounce = lines.some((l) => l.includes('미션 종료') || l.includes('미션 결과'));
+    const base = {
+      fontSize: '20px',
+      fontStyle: 'bold' as const,
+      align: 'center' as const,
+      padding: { x: 16, y: 10 },
+      lineSpacing: 6,
+      wordWrap: { width: wrapW },
+    };
+    if (chargeAnnounce) {
+      this.missionBanner.setStyle({
+        ...base,
+        color: '#e8d6ff',
+        backgroundColor: '#2a1058ee',
+      });
+    } else if (foxBuffAnnounce) {
+      this.missionBanner.setStyle({
+        ...base,
+        color: '#ffe0c2',
+        backgroundColor: '#7a3010ee',
+      });
+    } else if (endAnnounce) {
+      this.missionBanner.setStyle({
+        ...base,
+        color: '#fff8e7',
+        backgroundColor: '#1e3a5fee',
+      });
+    } else {
+      this.missionBanner.setStyle({
+        ...base,
+        color: '#ffe08a',
+        backgroundColor: '#7a1f1cee',
+      });
+    }
+    this.missionBanner.setAlpha(1);
+  }
+
+  private syncDarknessOverlay(state: MatchState): void {
+    const isSeeker =
+      this.you != null &&
+      (state.seekerId === this.you || (state.mode === 'practice' && state.practiceRole === 'fox'));
+    const seekerBlind = isSeeker && (state.seekerBlindRemainingMs ?? 0) > 0;
+    const globalDark = (state.darknessRemainingMs ?? 0) > 0;
+    const active = state.phase === 'playing' && (globalDark || seekerBlind);
+
+    this.darknessOverlay.setVisible(active);
+    this.darknessLabel.setVisible(active);
+    if (active) {
+      const w = this.scale.width;
+      const h = this.scale.height;
+      this.darknessOverlay.setPosition(w / 2, h / 2);
+      this.darknessOverlay.setSize(w + 4, h + 4);
+      this.darknessLabel.setPosition(w / 2, h / 2);
+      if (seekerBlind && !globalDark) {
+        const sec = ((state.seekerBlindRemainingMs ?? 0) / 1000).toFixed(1);
+        const stunSec = ((state.seekerStunRemainingMs ?? 0) / 1000).toFixed(1);
+        this.darknessLabel.setText(
+          `AI 토끼 오인 페널티!\n시야 차단 (${sec}초)\n스턴 (${stunSec}초)`,
+        );
+      } else {
+        this.darknessLabel.setText('암흑');
+      }
+    }
   }
 
   /**
@@ -468,7 +686,8 @@ export class GameScene extends Phaser.Scene {
     if (!d || d.ok === false) return;
     const kind: CatchVictimKind = d.kind === 'human' ? 'human' : 'ai';
     const name = typeof d.name === 'string' ? d.name : kind === 'ai' ? 'AI' : '유저';
-    this.statusText.setText(catchAnnounceText({ kind, name }));
+    const ruleMode = this.state?.ruleMode ?? this.state?.config?.ruleMode;
+    this.statusText.setText(catchAnnounceText({ kind, name }, ruleMode));
     if (
       kind === 'human' &&
       d.placeGrave !== false &&
@@ -478,6 +697,56 @@ export class GameScene extends Phaser.Scene {
     ) {
       this.spawnHumanGrave(d.caughtId, name, d.x, d.y);
     }
+  }
+
+  private leavingToMenu = false;
+
+  /**
+   * Leave current session and open main menu (room list / create).
+   * Must not hang: PeerJS destroy is deferred; Menu starts on the next frame.
+   */
+  private requestReturnToMenu(): void {
+    if (this.leavingToMenu) return;
+    this.leavingToMenu = true;
+
+    // Stop simulation immediately so update loop idles
+    this.state = null;
+    this.you = null;
+
+    teardownSessionHosts({
+      practice: this.localPractice,
+      peer: this.peer,
+      client: this.client,
+    });
+    this.localPractice = null;
+    this.peer = null;
+    this.client = null;
+
+    try {
+      this.clearGraves();
+    } catch {
+      /* ignore */
+    }
+
+    // Snack Games hub (not hide-and-seek Menu lobby)
+    try {
+      this.scene.start('Hub');
+    } catch {
+      try {
+        this.scene.launch('Hub');
+        this.scene.stop('Game');
+      } catch {
+        /* last resort */
+      }
+    }
+  }
+
+  /** Host: match ended/playing → shared room waiting lobby (no rematch). */
+  private requestReturnToRoomLobby(): void {
+    if (this.localPractice) return;
+    if (this.peer && this.peerRole !== 'host') return;
+    this.clearGraves();
+    this.sendIntent({ type: 'return_to_lobby' });
   }
 
   private requestStart(): void {
@@ -527,7 +796,11 @@ export class GameScene extends Phaser.Scene {
         ? `여우 연습 · ${this.playerName}`
         : `토끼 연습 · ${this.playerName}`,
     );
-    this.localPractice = new LocalPracticeHost(this.practiceRole, this.playerName);
+    this.localPractice = new LocalPracticeHost(
+      this.practiceRole,
+      this.playerName,
+      this.roomSettings?.ruleMode ?? 'standard',
+    );
     this.localPractice.onMessage = (msg) => {
       if (msg.type === 'welcome') {
         this.you = msg.playerId;
@@ -687,23 +960,15 @@ export class GameScene extends Phaser.Scene {
   private drawHudPanel(w: number, h: number): void {
     const g = this.hudPanel;
     g.clear();
-    const x = 14;
-    const y = 12;
-    // Soft outer shadow
-    g.fillStyle(0x000000, 0.22);
-    g.fillRoundedRect(x + 3, y + 4, w, h, 14);
-    // Glass body
-    g.fillStyle(0x0b1220, 0.78);
-    g.fillRoundedRect(x, y, w, h, 14);
-    // Gold edge accent
-    g.lineStyle(1.5, 0xe8c96a, 0.55);
-    g.strokeRoundedRect(x, y, w, h, 14);
-    // Top highlight line
-    g.lineStyle(2, 0xffffff, 0.08);
-    g.beginPath();
-    g.moveTo(x + 16, y + 1);
-    g.lineTo(x + w - 16, y + 1);
-    g.strokePath();
+    const x = 10;
+    const y = 8;
+    // Light glass — lower alpha so rabbits behind the corner stay visible
+    g.fillStyle(0x000000, 0.12);
+    g.fillRoundedRect(x + 2, y + 2, w, h, 10);
+    g.fillStyle(0x0b1220, 0.48);
+    g.fillRoundedRect(x, y, w, h, 10);
+    g.lineStyle(1, 0xe8c96a, 0.28);
+    g.strokeRoundedRect(x, y, w, h, 10);
   }
 
   /**
@@ -875,8 +1140,12 @@ export class GameScene extends Phaser.Scene {
 
     if (this.state.phase !== 'playing') return;
     const you = this.you;
-    // Block local seeker input during prep (host also rejects)
-    if (you && this.seekerIsBlind(this.state, you)) {
+    const isFox =
+      you != null &&
+      (this.state.seekerId === you || this.state.practiceRole === 'fox');
+    const isStunned = isFox && (this.state.seekerStunRemainingMs ?? 0) > 0;
+    // Block local seeker input during prep or stun (host also rejects)
+    if (you && (this.seekerIsBlind(this.state, you) || isStunned)) {
       return;
     }
     const intents = this.inputCtl.poll();
@@ -887,18 +1156,11 @@ export class GameScene extends Phaser.Scene {
           this.sendIntent(intent);
         }
       } else if (intent.type === 'catch') {
-        // Role-split Space: fox catches; rabbit uses mission_action for touch_fox
+        // Space = fox catch only (rabbit touch is T → mission_action)
         const isFox =
           you != null &&
           (this.state.seekerId === you || this.state.practiceRole === 'fox');
-        if (
-          !isFox &&
-          this.state.mission?.kind === 'touch_fox' &&
-          you &&
-          this.state.entities[you]?.alive
-        ) {
-          this.sendIntent({ type: 'mission_action' });
-        } else if (isFox) {
+        if (isFox) {
           this.sendIntent(intent);
         }
       } else {
@@ -939,6 +1201,8 @@ export class GameScene extends Phaser.Scene {
       this.frozenOthers.clear();
     }
 
+    // During roulette, hide true seeker so fox sprite does not leak before reveal
+    const visualSeeker = visualSeekerId(state);
     const seen = new Set<string>();
     for (const e of Object.values(state.entities)) {
       seen.add(e.id);
@@ -950,9 +1214,6 @@ export class GameScene extends Phaser.Scene {
           display = { ...e, x: frozen.x, y: frozen.y, vx: 0, vy: 0 };
         }
       }
-
-      // During roulette, hide true seeker so fox sprite does not leak before reveal
-      const visualSeeker = visualSeekerId(state);
 
       // Facing + Phaser Animation Manager (run/idle)
       const prevFace = this.lastFacing.get(e.id) ?? 'down';
@@ -980,7 +1241,7 @@ export class GameScene extends Phaser.Scene {
         body.setCircle(r, 32 - r, 32 - r);
         body.setBounce(0, 0);
         body.setDrag(0, 0);
-        body.setMaxVelocity(SEEKER_SPEED, SEEKER_SPEED);
+        body.setMaxVelocity(SEEKER_SPEED + 90, SEEKER_SPEED + 90);
         this.entityGroup.add(created);
         this.sprites.set(e.id, created);
         spr = created;
@@ -1006,7 +1267,8 @@ export class GameScene extends Phaser.Scene {
           body.enable = true;
           body.moves = true;
           const isSeeker = state.seekerId === you;
-          const speed = isSeeker ? SEEKER_SPEED : RABBIT_SPEED;
+          const speed = isSeeker ? seekerMoveSpeed(state) : RABBIT_SPEED;
+          body.setMaxVelocity(speed, speed);
           body.setVelocity(this.lastMoveSent.dx * speed, this.lastMoveSent.dy * speed);
         } else {
           body.setVelocity(0, 0);
@@ -1030,44 +1292,86 @@ export class GameScene extends Phaser.Scene {
       // Everyone visible when match ends (prep blackout no longer applies)
       spr.setVisible(matchOver || !(seekerBlind && e.id !== you));
 
-      // Name tags: during play fox cannot read rabbit nicks; on ended, reveal all humans + AI
-      const tagLabel = nameTagLabel(e, you, visualSeeker, state.phase);
+      // Local rabbit: name-tag + ring only (same size as everyone — no size tell)
+      const isLocalRabbit =
+        e.id === you &&
+        e.kind === 'human' &&
+        e.role !== 'seeker' &&
+        !(visualSeeker != null && e.id === visualSeeker);
+      spr.setDisplaySize(64, 64);
+      spr.clearTint();
+      spr.setDepth(20 + display.y * 0.01);
+
+      // Name tags: depth above rabbit sprites (sprites use ~20 + y*0.01)
+      const hasSkill =
+        state.darknessChargeId === e.id &&
+        e.kind === 'human' &&
+        e.role !== 'seeker' &&
+        // Fox must not learn who holds the skill from nameplates
+        !(you != null && visualSeeker != null && you === visualSeeker);
+      const isFox = e.id === visualSeeker || e.role === 'seeker';
+      const isStunned = isFox && (state.seekerStunRemainingMs ?? 0) > 0;
+      const tagLabel = nameTagLabel(e, you, visualSeeker, state.phase, {
+        hasDarknessSkill: hasSkill,
+        isStunned,
+        stunRemainingMs: state.seekerStunRemainingMs,
+      });
       const showTag =
         tagLabel.length > 0 && (matchOver || !(seekerBlind && e.id !== you));
+      // Always above entities (max sprite ~31); y-sort among tags
+      const tagDepth = 50 + display.y * 0.01;
       let tag = this.nameTags.get(e.id);
       if (showTag) {
+        const localTag = isLocalRabbit && !matchOver;
         if (!tag) {
           tag = this.add
-            .text(display.x, display.y - 28, tagLabel, {
-              fontSize: matchOver ? '13px' : '11px',
-              color: e.kind === 'ai' ? '#c5d0dc' : '#fff8e7',
-              backgroundColor: e.kind === 'human' ? '#1a3a2acc' : '#00000066',
-              padding: { x: 4, y: 2 },
-              fontStyle: e.kind === 'human' ? 'bold' : 'normal',
+            .text(display.x, display.y - (localTag ? 36 : 28), tagLabel, {
+              fontSize: matchOver ? '13px' : localTag ? '13px' : '11px',
+              color: isStunned ? '#ffedd5' : localTag ? '#b8ffd0' : e.kind === 'ai' ? '#c5d0dc' : '#fff8e7',
+              backgroundColor: isStunned
+                ? '#b91c1cee'
+                : localTag
+                  ? '#14532dee'
+                  : e.kind === 'human'
+                    ? '#1a3a2acc'
+                    : '#00000066',
+              padding: { x: localTag || isStunned ? 8 : 4, y: localTag || isStunned ? 4 : 2 },
+              fontStyle: e.kind === 'human' || localTag || isStunned ? 'bold' : 'normal',
+              align: 'center',
             })
             .setOrigin(0.5)
-            .setDepth(matchOver ? 40 : 11);
+            .setDepth(tagDepth);
           this.nameTags.set(e.id, tag);
         }
-        tag.setPosition(display.x, display.y - 28);
+        tag.setPosition(display.x, display.y - (localTag ? 36 : 28));
         tag.setText(tagLabel);
         tag.setAlpha(e.alive ? 1 : 0.75);
         tag.setVisible(true);
-        tag.setDepth(matchOver ? 40 : 11);
-        if (matchOver) {
-          tag.setStyle({
-            fontSize: '13px',
-            color: e.kind === 'ai' ? '#c5d0dc' : '#fff8e7',
-            backgroundColor: e.kind === 'human' ? '#1a3a2acc' : '#00000066',
-            fontStyle: e.kind === 'human' ? 'bold' : 'normal',
-          });
-        }
+        tag.setDepth(tagDepth);
+        tag.setStyle({
+          fontSize: matchOver ? '13px' : localTag ? '13px' : '11px',
+          color: isStunned ? '#ffedd5' : localTag ? '#b8ffd0' : e.kind === 'ai' ? '#c5d0dc' : '#fff8e7',
+          backgroundColor: isStunned
+            ? '#b91c1cee'
+            : localTag
+              ? '#14532dee'
+              : e.kind === 'human'
+                ? '#1a3a2acc'
+                : '#00000066',
+          fontStyle: e.kind === 'human' || localTag || isStunned ? 'bold' : 'normal',
+          align: 'center',
+        });
       } else if (tag) {
         // Remove empty / forbidden tags so background boxes never linger
         tag.destroy();
         this.nameTags.delete(e.id);
       }
     }
+
+    this.syncLocalRabbitRing(state, you, matchOver, seekerBlind, visualSeeker);
+    // Catch cooldown progress bar above the fox
+    this.syncCatchCooldownBar(state, you, matchOver, seekerBlind, visualSeeker);
+
     for (const id of [...this.sprites.keys()]) {
       if (!seen.has(id)) {
         this.sprites.get(id)?.destroy();
@@ -1081,6 +1385,116 @@ export class GameScene extends Phaser.Scene {
         }
       }
     }
+  }
+
+  /** Pulsing ring under the local rabbit (not for fox / ended / prep blind). */
+  private syncLocalRabbitRing(
+    state: MatchState,
+    you: string,
+    matchOver: boolean,
+    seekerBlind: boolean,
+    visualSeeker: string | null,
+  ): void {
+    const me = state.entities[you];
+    const isRabbit =
+      me &&
+      me.kind === 'human' &&
+      me.role !== 'seeker' &&
+      !(visualSeeker != null && you === visualSeeker);
+    const hide =
+      matchOver ||
+      !isRabbit ||
+      !me?.alive ||
+      (seekerBlind && false); // self always visible to self during prep
+
+    if (hide) {
+      this.localRing?.setVisible(false);
+      return;
+    }
+
+    const spr = this.sprites.get(you);
+    if (!spr) {
+      this.localRing?.setVisible(false);
+      return;
+    }
+
+    if (!this.localRing) {
+      // Stroke-only ring (no soft green fill/tint under the feet)
+      this.localRing = this.add
+        .circle(spr.x, spr.y + 10, 32, 0x000000, 0)
+        .setStrokeStyle(3, 0x86efac, 0.95)
+        .setDepth(18);
+    }
+    // Gentle pulse so the ring reads as “you”
+    const pulse = 0.85 + 0.15 * Math.sin(this.time.now / 280);
+    this.localRing
+      .setPosition(spr.x, spr.y + 14)
+      .setRadius(30 * pulse)
+      .setScale(1)
+      .setVisible(true)
+      .setDepth(18 + spr.y * 0.01)
+      .setAlpha(0.55 + 0.25 * pulse);
+  }
+
+  /**
+   * World-space progress bar above the seeker while catch cooldown is active.
+   * Full bar at catch; drains to empty as cooldown elapses.
+   */
+  private syncCatchCooldownBar(
+    state: MatchState,
+    you: string,
+    matchOver: boolean,
+    seekerBlind: boolean,
+    visualSeeker: string | null,
+  ): void {
+    const barW = 44;
+    const barH = 7;
+    const cd = state.catchCooldownRemainingMs ?? 0;
+    const progress = catchCooldownProgress(cd, CATCH_COOLDOWN_MS);
+    const seekerId = visualSeeker ?? state.seekerId;
+    const hide =
+      matchOver ||
+      progress <= 0 ||
+      !seekerId ||
+      (seekerBlind && seekerId !== you);
+
+    if (hide) {
+      this.catchCdBg?.setVisible(false);
+      this.catchCdFill?.setVisible(false);
+      return;
+    }
+
+    const spr = this.sprites.get(seekerId);
+    const ent = state.entities[seekerId];
+    if (!spr || !ent) {
+      this.catchCdBg?.setVisible(false);
+      this.catchCdFill?.setVisible(false);
+      return;
+    }
+
+    const x = spr.x;
+    const y = spr.y - 42;
+    const depth = 55 + spr.y * 0.01;
+    const fillW = Math.max(2, barW * progress);
+
+    if (!this.catchCdBg) {
+      this.catchCdBg = this.add
+        .rectangle(x, y, barW, barH, 0x1c1917, 0.92)
+        .setStrokeStyle(1, 0xfbbf24, 0.95)
+        .setDepth(depth);
+      this.catchCdFill = this.add
+        .rectangle(x - barW / 2, y, fillW, barH - 2, 0xf59e0b, 1)
+        .setOrigin(0, 0.5)
+        .setDepth(depth + 0.01);
+    }
+
+    this.catchCdBg.setPosition(x, y).setVisible(true).setDepth(depth);
+    this.catchCdFill
+      ?.setPosition(x - barW / 2, y)
+      .setSize(fillW, barH - 2)
+      .setFillStyle(progress > 0.33 ? 0xf59e0b : 0xef4444, 1)
+      .setVisible(true)
+      .setDepth(depth + 0.01);
   }
 
   private updateHud(state: MatchState, you: string): void {
@@ -1102,7 +1516,7 @@ export class GameScene extends Phaser.Scene {
     const starting = state.phase === 'starting' && state.mode === 'normal';
 
     // Title
-    let title = '초원 숨바꼭질';
+    let title = 'AI 술래잡기';
     if (state.mode === 'practice') {
       title = state.practiceRole === 'fox' ? '연습 · 여우' : '연습 · 토끼';
     } else if (state.phase === 'lobby') {
@@ -1166,20 +1580,15 @@ export class GameScene extends Phaser.Scene {
             : '관전';
       rows.push(`역할  ${myRole}`);
       rows.push(`닉네임  ${this.playerName}`);
+      if ((state.ruleMode ?? state.config?.ruleMode) === 'stun_penalty') {
+        rows.push('모드  무제한 스턴');
+      }
 
       if (state.phase === 'playing') {
         rows.push(`시간  ${formatClock(state.timeRemainingMs)}`);
-        if (state.seekerId === you) {
-          rows.push(
-            `잡기 횟수  ${state.catchBudgetRemaining}/${state.config.catchBudget}`,
-          );
-        }
-        // Role-specific objectives (fox vs rabbit)
+        // Compact objectives (already short) + mission status only
         for (const line of roleObjectiveLines(state, you)) {
           rows.push(line);
-        }
-        if (!prepActive && state.seekerId === you) {
-          rows.push(`조작  범위 ${state.config.catchRange}px 에서 잡기`);
         }
         for (const line of missionHudLines(state, you)) {
           rows.push(line);
@@ -1189,6 +1598,7 @@ export class GameScene extends Phaser.Scene {
 
     this.syncMissionMarker(state);
     this.syncMissionBanner(state);
+    this.syncDarknessOverlay(state);
 
     if (state.phase === 'lobby') {
       if (this.peer && this.peerRole === 'host') {
@@ -1223,37 +1633,61 @@ export class GameScene extends Phaser.Scene {
         rows.push(`잡힌 유저  ${caught.map((c) => c.name).join(', ')}`);
       }
       rows.push('안내  머리 위 이름 = 유저 · AI는 "AI" 표시');
-      rows.push('안내  다시하기 또는 Enter');
+      rows.push('안내  다시하기 · 대기실로 · 로비로 돌아가기');
     }
 
     this.hudBody.setText(rows.join('\n'));
 
-    // Fit glass panel to content
-    const padX = 28;
-    const padY = 18;
-    const gap = 8;
+    // Compact panel — smaller during hunt so corner rabbits stay visible
+    const compact =
+      state.phase === 'playing' && state.mode !== 'practice' ? true : state.phase === 'playing';
+    const padX = compact ? 12 : 16;
+    const padY = compact ? 8 : 12;
+    const gap = compact ? 4 : 6;
     const titleH = this.hudTitle.height;
     const bodyH = this.hudBody.height;
-    const panelW = Math.max(
-      300,
-      Math.ceil(Math.max(this.hudTitle.width, this.hudBody.width) + padX * 2),
+    const panelW = Math.min(
+      280,
+      Math.max(
+        160,
+        Math.ceil(Math.max(this.hudTitle.width, this.hudBody.width) + padX * 2),
+      ),
     );
     const panelH = Math.ceil(padY + titleH + gap + bodyH + padY);
     this.drawHudPanel(panelW, panelH);
-    this.hudTitle.setPosition(14 + padX - 6, 12 + padY - 4);
-    this.hudBody.setPosition(14 + padX - 6, 12 + padY + titleH + gap - 2);
+    this.hudTitle.setPosition(10 + padX - 4, 8 + padY - 2);
+    this.hudBody.setPosition(10 + padX - 4, 8 + padY + titleH + gap - 2);
+    // Hide verbose connection status during active hunt (bottom strip only for lobby/errors)
+    if (state.phase === 'playing' && !this.statusText.text.includes('오류') && !this.statusText.text.includes('끊')) {
+      this.statusText.setAlpha(0.35);
+    } else {
+      this.statusText.setAlpha(0.85);
+      this.statusText.setPosition(16, this.scale.height - 28);
+    }
 
-    const showCatch =
+    const isFoxYou =
+      state.seekerId === you &&
+      (state.mode === 'normal' || state.practiceRole === 'fox');
+    const isRabbitMissionTouch =
+      state.seekerId !== you &&
+      state.mission?.kind === 'touch_rabbit' &&
+      state.entities[you]?.alive === true &&
+      (state.mode === 'normal' || state.mode === 'practice');
+    if (
       state.phase === 'playing' &&
       !this.seekerIsBlind(state, you) &&
-      ((state.seekerId === you &&
-        (state.mode === 'normal' || state.practiceRole === 'fox')) ||
-        // Rabbit mobile button doubles as mission touch during touch_fox
-        (state.seekerId !== you &&
-          state.mission?.kind === 'touch_fox' &&
-          state.entities[you]?.alive === true &&
-          (state.mode === 'normal' || state.mode === 'practice')));
-    this.inputCtl.setCatchVisible(showCatch);
+      isFoxYou
+    ) {
+      this.inputCtl.setActionButtonMode('catch');
+    } else if (
+      state.phase === 'playing' &&
+      !this.seekerIsBlind(state, you) &&
+      isRabbitMissionTouch
+    ) {
+      this.inputCtl.setActionButtonMode('mission');
+    } else {
+      this.inputCtl.setActionButtonMode('hidden');
+    }
 
     const showStart =
       this.playMode !== 'practice' &&
@@ -1262,6 +1696,32 @@ export class GameScene extends Phaser.Scene {
     this.startBtn.setVisible(showStart);
     const label = this.startBtn.getData('label') as Phaser.GameObjects.Text | undefined;
     label?.setText(state.phase === 'ended' ? '다시하기' : '시작');
+
+    // Always show main-menu exit — move the hit rects (not empty containers)
+    const lobbyX = showStart ? this.scale.width / 2 - 110 : this.scale.width / 2;
+    const lobbyY = this.scale.height - 56;
+    const lobbyBg = this.lobbyBackBtn.getData('bg') as Phaser.GameObjects.Rectangle;
+    const lobbyLabel = this.lobbyBackBtn.getData('label') as Phaser.GameObjects.Text;
+    lobbyBg?.setVisible(true).setPosition(lobbyX, lobbyY);
+    lobbyLabel?.setVisible(true).setPosition(lobbyX, lobbyY);
+    // Keep interactive enabled every frame (some Phaser paths disable on hide)
+    if (lobbyBg && !lobbyBg.input) {
+      lobbyBg.setInteractive({ useHandCursor: true });
+    }
+
+    const startBg = this.startBtn.getData('bg') as Phaser.GameObjects.Rectangle;
+    const startLabel = this.startBtn.getData('label') as Phaser.GameObjects.Text;
+    startBg?.setVisible(showStart).setPosition(this.scale.width / 2 + 110, this.scale.height - 56);
+    startLabel?.setVisible(showStart).setPosition(this.scale.width / 2 + 110, this.scale.height - 56);
+
+    const showRoomLobby =
+      this.playMode !== 'practice' &&
+      state.phase === 'ended' &&
+      (!this.peer || this.peerRole === 'host');
+    const roomBg = this.roomLobbyBtn.getData('bg') as Phaser.GameObjects.Rectangle;
+    const roomLabel = this.roomLobbyBtn.getData('label') as Phaser.GameObjects.Text;
+    roomBg?.setVisible(showRoomLobby).setPosition(this.scale.width / 2, this.scale.height - 112);
+    roomLabel?.setVisible(showRoomLobby).setPosition(this.scale.width / 2, this.scale.height - 112);
   }
 }
 

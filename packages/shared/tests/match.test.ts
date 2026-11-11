@@ -119,6 +119,9 @@ describe('timer and catch budget', () => {
     expect(state.catchBudgetRemaining).toBe(1);
     expect(state.entities[aiId]?.alive).toBe(false);
 
+    // Clear catch cooldown so second grab can fire immediately in this unit test
+    state = { ...state, catchCooldownRemainingMs: 0 };
+
     // Catch human → success, budget decrements again, grave
     catchRes = attemptCatch(state, seekerId, hiderId);
     expect(catchRes.ok).toBe(true);
@@ -208,7 +211,11 @@ describe('timer and catch budget', () => {
     expect(aiCatch.state.entities[aiId]?.alive).toBe(false);
     expect(aiCatch.state.catchBudgetRemaining).toBe(budgetBefore - 1);
 
-    const humanCatch = attemptCatch(aiCatch.state, seekerId, hiderId);
+    const humanCatch = attemptCatch(
+      { ...aiCatch.state, catchCooldownRemainingMs: 0 },
+      seekerId,
+      hiderId,
+    );
     expect(humanCatch.ok).toBe(true);
     if (humanCatch.ok) {
       expect(humanCatch.kind).toBe('human');

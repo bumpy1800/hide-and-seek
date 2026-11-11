@@ -7,7 +7,13 @@ import {
   startMatch,
   type MatchState,
 } from '@hide-and-seek/shared';
-import { listUserRabbits, nameTagLabel, userRabbitRevealLines } from './nameTags';
+import {
+  DARKNESS_SKILL_ICON,
+  catchCooldownProgress,
+  listUserRabbits,
+  nameTagLabel,
+  userRabbitRevealLines,
+} from './nameTags';
 
 function playingTwo(): MatchState {
   let lobby = createLobby('t', defaultConfig({ aiCount: 1, seekerPrepMs: 0 }));
@@ -18,6 +24,28 @@ function playingTwo(): MatchState {
 }
 
 describe('nameTagLabel', () => {
+  it('catch cooldown progress is 0..1 for progress bar', () => {
+    expect(catchCooldownProgress(3000, 3000)).toBe(1);
+    expect(catchCooldownProgress(1500, 3000)).toBeCloseTo(0.5);
+    expect(catchCooldownProgress(0, 3000)).toBe(0);
+  });
+
+  it('puts darkness skill icon left of rabbit nick; fox never sees it', () => {
+    const state = playingTwo();
+    const seeker = state.seekerId!;
+    const rabbitId = state.humans.find((h) => h !== seeker)!;
+    const rabbit = state.entities[rabbitId]!;
+    const withSkill = nameTagLabel(rabbit, rabbitId, seeker, 'playing', {
+      hasDarknessSkill: true,
+    });
+    expect(withSkill.startsWith(`${DARKNESS_SKILL_ICON} `)).toBe(true);
+    expect(withSkill).toContain((rabbit.name ?? '').trim() || '나');
+    // Fox viewing rabbit still gets empty plate (no skill leak)
+    expect(
+      nameTagLabel(rabbit, seeker, seeker, 'playing', { hasDarknessSkill: true }),
+    ).toBe('');
+  });
+
   it('hides rabbit nicknames from fox during play; rabbits see each other', () => {
     let lobby = createLobby('nicks', defaultConfig({ aiCount: 1, seekerPrepMs: 0 }));
     let res = joinHuman(lobby, 'fox', '여우님');
@@ -63,6 +91,17 @@ describe('nameTagLabel', () => {
     expect(nameTagLabel(ai, seeker, seeker, 'ended')).toBe('AI');
     const fox = state.entities[seeker]!;
     expect(nameTagLabel(fox, hider, seeker, 'ended')).toMatch(/^술래/);
+  });
+
+  it('displays stun duration above seeker when isStunned is true', () => {
+    const state = playingTwo();
+    const seeker = state.seekerId!;
+    const fox = state.entities[seeker]!;
+    const label = nameTagLabel(fox, null, seeker, 'playing', {
+      isStunned: true,
+      stunRemainingMs: 4200,
+    });
+    expect(label).toBe('술래 💫 스턴 (4.2초)');
   });
 });
 

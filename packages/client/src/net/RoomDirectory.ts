@@ -13,6 +13,9 @@ export type PublicRoom = {
   maxPlayers: number;
   phase: 'lobby' | 'playing' | 'ended';
   updatedAt: number;
+  /** Optional game id so lobbies can filter (e.g. hide-and-seek vs meteor-dodge). */
+  game?: string;
+  ruleMode?: import('@hide-and-seek/shared').RoomRuleMode;
 };
 
 type DirMsg =

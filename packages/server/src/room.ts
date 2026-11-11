@@ -1,24 +1,17 @@
 import {
-  SEEKER_SPEED,
-  RABBIT_SPEED,
-  applyMissionAction,
-  attemptCatch,
-  canSeekerAct,
+  applyPlayingIntent,
   createLobby,
   defaultConfig,
-  integrateMotion,
-  isSeekerPrepActive,
   joinHuman,
   leaveHuman,
-  nearestCatchTarget,
+  matchEndedDetail,
   resetAiBrains,
   returnToLobby,
-  setEntityVelocity,
   startMatch,
-  stepAiCrowd,
-  tickTimer,
+  tickAuthority,
   type ClientIntent,
   type ClientMessage,
+  type HostSimEvent,
   type MatchMode,
   type PracticeRole,
   type MatchState,
@@ -79,6 +72,16 @@ export class Room {
   }
 
   applyIntent(playerId: string, intent: ClientIntent): void {
+    if (intent.type === 'return_to_lobby') {
+      if (this.state.phase !== 'ended' && this.state.phase !== 'playing') return;
+      this.state = returnToLobby(this.state);
+      resetAiBrains(this.id);
+      this.endedBroadcast = false;
+      this.broadcastSnapshot();
+      this.broadcast({ type: 'event', event: 'returned_to_lobby', detail: {} });
+      return;
+    }
+
     if (intent.type === 'start') {
       if (this.state.phase === 'playing') return;
       if (this.state.phase === 'ended') {
@@ -91,7 +94,11 @@ export class Room {
       resetAiBrains(this.id);
       const mode: MatchMode = intent.mode === 'practice' ? 'practice' : 'normal';
       const practiceRole: PracticeRole | undefined =
-        intent.practiceRole === 'fox' ? 'fox' : intent.practiceRole === 'rabbit' ? 'rabbit' : undefined;
+        intent.practiceRole === 'fox'
+          ? 'fox'
+          : intent.practiceRole === 'rabbit'
+            ? 'rabbit'
+            : undefined;
       if (mode === 'normal' && this.state.humans.length < 2) {
         this.send(playerId, {
           type: 'error',
@@ -112,6 +119,7 @@ export class Room {
           seed: Date.now() ^ this.state.humans.length,
           foxMode: mode === 'normal' ? foxMode : undefined,
           designatedSeekerId: mode === 'normal' ? designatedSeekerId : undefined,
+          ruleMode: intent.ruleMode ?? this.state.ruleMode ?? this.state.config?.ruleMode,
         });
       } catch (e) {
         this.send(playerId, {
@@ -145,78 +153,36 @@ export class Room {
       return;
     }
 
-    if (this.state.phase !== 'playing') return;
-    const entity = this.state.entities[playerId];
-    if (!entity || !entity.alive) return;
-
-    if (intent.type === 'move') {
-      // Seeker cannot move during prep
-      if (this.state.seekerId === playerId && isSeekerPrepActive(this.state)) {
-        return;
-      }
-      const len = Math.hypot(intent.dx, intent.dy) || 1;
-      const nx = intent.dx / len;
-      const ny = intent.dy / len;
-      const isSeeker = this.state.seekerId === playerId;
-      const speed = isSeeker ? SEEKER_SPEED : RABBIT_SPEED;
-      const vx = intent.dx === 0 && intent.dy === 0 ? 0 : nx * speed;
-      const vy = intent.dx === 0 && intent.dy === 0 ? 0 : ny * speed;
-      this.state = setEntityVelocity(this.state, playerId, vx, vy);
-      return;
+    const result = applyPlayingIntent(this.state, playerId, intent);
+    this.state = result.state;
+    this.dispatchHostEvents(result.events);
+    if (this.state.phase === 'ended') {
+      resetAiBrains(this.id);
     }
+  }
 
-    if (intent.type === 'mission_action') {
-      this.state = applyMissionAction(this.state, playerId);
-      this.broadcastSnapshot();
-      return;
-    }
-
-    if (intent.type === 'catch') {
-      if (
-        this.state.seekerId !== playerId &&
-        this.state.mission?.kind === 'touch_fox'
-      ) {
-        this.state = applyMissionAction(this.state, playerId);
+  private dispatchHostEvents(events: HostSimEvent[]): void {
+    for (const ev of events) {
+      if (ev.kind === 'snapshot') {
         this.broadcastSnapshot();
-        return;
+        continue;
       }
-      if (!canSeekerAct(this.state, playerId)) return;
-      const targetId = nearestCatchTarget(this.state, playerId);
-      if (!targetId) {
-        this.send(playerId, { type: 'event', event: 'catch_miss', detail: { reason: 'no_target' } });
-        return;
-      }
-      const result = attemptCatch(this.state, playerId, targetId);
-      this.state = result.state;
-      this.broadcast({
+      const msg: ServerMessage = {
         type: 'event',
-        event: result.ok ? 'catch_success' : 'catch_fail',
-        detail: result.ok
-          ? {
-              ok: true,
-              kind: result.kind,
-              name: result.name,
-              x: result.x,
-              y: result.y,
-              caughtId: result.caughtId,
-              placeGrave: result.placeGrave,
-            }
-          : result,
-      });
-      this.broadcastSnapshot();
-      if (this.state.phase === 'ended') {
-        resetAiBrains(this.id);
+        event: ev.event,
+        detail: ev.detail,
+      };
+      if (ev.to && ev.to !== 'all') {
+        this.send(ev.to, msg);
+      } else {
+        this.broadcast(msg);
       }
     }
   }
 
   tick(dtMs: number): void {
     if (this.state.phase !== 'playing' && this.state.phase !== 'starting') return;
-    if (this.state.phase === 'playing') {
-      this.state = stepAiCrowd(this.state, dtMs, this.state.tick + 1);
-      this.state = integrateMotion(this.state, dtMs / 1000);
-    }
-    this.state = tickTimer(this.state, dtMs);
+    this.state = tickAuthority(this.state, dtMs);
     this.broadcastSnapshot();
     if (this.state.phase === 'ended' && !this.endedBroadcast) {
       this.endedBroadcast = true;
@@ -224,7 +190,7 @@ export class Room {
       this.broadcast({
         type: 'event',
         event: 'match_ended',
-        detail: { winner: this.state.winner, reason: this.state.endReason },
+        detail: matchEndedDetail(this.state),
       });
     }
   }
