@@ -579,7 +579,7 @@ export class GameScene extends Phaser.Scene {
       (state.seekerId === this.you || (state.mode === 'practice' && state.practiceRole === 'fox'));
     let isStunBanner = false;
 
-    if (!lines && stunMs > 0 && state.phase === 'playing') {
+    if (stunMs > 0 && state.phase === 'playing') {
       isStunBanner = true;
       const sec = (stunMs / 1000).toFixed(1);
       if (isFox) {
@@ -1729,9 +1729,11 @@ export class GameScene extends Phaser.Scene {
       state.mission?.kind === 'touch_rabbit' &&
       state.entities[you]?.alive === true &&
       (state.mode === 'normal' || state.mode === 'practice');
+    const isFoxStunned = (state.seekerStunRemainingMs ?? 0) > 0;
     if (
       state.phase === 'playing' &&
       !this.seekerIsBlind(state, you) &&
+      !isFoxStunned &&
       isFoxYou
     ) {
       this.inputCtl.setActionButtonMode('catch');

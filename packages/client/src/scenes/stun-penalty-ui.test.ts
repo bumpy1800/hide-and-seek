@@ -27,15 +27,22 @@ describe('Stun penalty mode UI wiring in client', () => {
     expect(darkSection).toMatch(/darknessLabel\.setStyle/);
   });
 
-  it('GameScene: top banner shows live countdown while seeker is stunned', () => {
+  it('GameScene: top banner shows live countdown while seeker is stunned even with active mission', () => {
     const src = readFileSync(resolve(__dirname, 'GameScene.ts'), 'utf8');
     const bannerSection = src.slice(
       src.indexOf('private syncMissionBanner'),
       src.indexOf('private syncDarknessOverlay'),
     );
-    expect(bannerSection).toMatch(/stunMs > 0/);
+    expect(bannerSection).toMatch(/if \(stunMs > 0 && state\.phase === 'playing'\)/);
+    expect(bannerSection).not.toMatch(/if \(!lines && stunMs > 0/);
     expect(bannerSection).toMatch(/스턴 상태! 못 움직입니다/);
     expect(bannerSection).toMatch(/술래가 AI 토끼를 잡아 스턴 상태입니다!/);
+  });
+
+  it('GameScene: mobile action button hides catch mode while seeker is stunned', () => {
+    const src = readFileSync(resolve(__dirname, 'GameScene.ts'), 'utf8');
+    expect(src).toMatch(/const isFoxStunned = \(state\.seekerStunRemainingMs \?\? 0\) > 0;/);
+    expect(src).toMatch(/!isFoxStunned &&/);
   });
 
   it('GameScene: input poll resets velocity and lastMoveSent on stun to prevent stuck input', () => {

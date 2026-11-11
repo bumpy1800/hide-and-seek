@@ -108,4 +108,16 @@ describe('hostSim shared authority', () => {
       catchBudget: state.config.catchBudget,
     });
   });
+
+  it('applyMoveIntent blocks seeker movement when stunned', () => {
+    let state = twoPlayer();
+    const fox = state.seekerId!;
+    state = {
+      ...state,
+      seekerStunRemainingMs: 3500,
+    };
+    state = applyMoveIntent(state, fox, 1, 0);
+    expect(state.entities[fox]!.vx).toBe(0);
+    expect(state.entities[fox]!.vy).toBe(0);
+  });
 });

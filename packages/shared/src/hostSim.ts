@@ -42,7 +42,12 @@ export function applyMoveIntent(
   if (state.phase !== 'playing') return state;
   const entity = state.entities[playerId];
   if (!entity || !entity.alive) return state;
-  if (state.seekerId === playerId && isSeekerPrepActive(state)) return state;
+  if (
+    state.seekerId === playerId &&
+    (isSeekerPrepActive(state) || (state.seekerStunRemainingMs ?? 0) > 0)
+  ) {
+    return state;
+  }
 
   const len = Math.hypot(dx, dy) || 1;
   const nx = dx / len;

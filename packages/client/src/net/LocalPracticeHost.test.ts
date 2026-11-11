@@ -54,6 +54,28 @@ describe('LocalPracticeHost practice stun penalty simulation', () => {
     );
     expect(catchEv).toBeDefined();
 
+    // 6) Secondary catch attempt while stunned is rejected
+    host.sendIntent({ type: 'catch' });
+    const postSecondCatch = host.getState();
+    expect(postSecondCatch.seekerStunRemainingMs).toBe(5000);
+
+    host.stop();
+  });
+
+  it('practice rabbit mode has no seeker and cannot catch', () => {
+    const host = new LocalPracticeHost('rabbit', '토끼');
+    host.start();
+    const state = host.getState();
+    expect(state.mode).toBe('practice');
+    expect(state.practiceRole).toBe('rabbit');
+    expect(state.seekerId).toBeNull();
+
+    // Rabbit catch intent does nothing
+    host.sendIntent({ type: 'catch' });
+    const postCatchState = host.getState();
+    expect(postCatchState.seekerStunRemainingMs).toBe(0);
+    expect(postCatchState.phase).toBe('playing');
+
     host.stop();
   });
 });
