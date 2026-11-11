@@ -7,6 +7,7 @@ import {
   SEEKER_PREP_MS,
   effectivePrepRemainingMs,
   isSeekerBlind,
+  isSeekerPrepActive,
   type EntityState,
   type MatchMode,
   type PracticeRole,
@@ -571,7 +572,23 @@ export class GameScene extends Phaser.Scene {
 
   private syncMissionBanner(state: MatchState): void {
     // Pass local player: fox must not see skill-holder; rabbits get full lines
-    const lines = missionBannerLines(state, this.you ?? undefined);
+    let lines = missionBannerLines(state, this.you ?? undefined);
+    const stunMs = state.seekerStunRemainingMs ?? 0;
+    const isFox =
+      this.you != null &&
+      (state.seekerId === this.you || (state.mode === 'practice' && state.practiceRole === 'fox'));
+    let isStunBanner = false;
+
+    if (!lines && stunMs > 0 && state.phase === 'playing') {
+      isStunBanner = true;
+      const sec = (stunMs / 1000).toFixed(1);
+      if (isFox) {
+        lines = [`💫 스턴 상태! 못 움직입니다 (${sec}초)`];
+      } else {
+        lines = [`💫 술래가 AI 토끼를 잡아 스턴 상태입니다! (${sec}초)`];
+      }
+    }
+
     if (!lines) {
       this.missionBanner.setVisible(false);
       return;
@@ -593,7 +610,13 @@ export class GameScene extends Phaser.Scene {
       lineSpacing: 6,
       wordWrap: { width: wrapW },
     };
-    if (chargeAnnounce) {
+    if (isStunBanner) {
+      this.missionBanner.setStyle({
+        ...base,
+        color: '#ffedd5',
+        backgroundColor: '#991b1bee',
+      });
+    } else if (chargeAnnounce) {
       this.missionBanner.setStyle({
         ...base,
         color: '#e8d6ff',
@@ -640,10 +663,28 @@ export class GameScene extends Phaser.Scene {
       if (seekerBlind && !globalDark) {
         const sec = ((state.seekerBlindRemainingMs ?? 0) / 1000).toFixed(1);
         const stunSec = ((state.seekerStunRemainingMs ?? 0) / 1000).toFixed(1);
+        this.darknessLabel.setStyle({
+          fontSize: '34px',
+          color: '#ffedd5',
+          fontStyle: 'bold',
+          stroke: '#dc2626',
+          strokeThickness: 5,
+          align: 'center',
+          lineSpacing: 12,
+        });
         this.darknessLabel.setText(
-          `AI 토끼 오인 페널티!\n시야 차단 (${sec}초)\n스턴 (${stunSec}초)`,
+          `⚠️ AI 토끼 오인 페널티!\n\n🌑 화면 암흑: ${sec}초\n💫 이동 불가(스턴): ${stunSec}초`,
         );
       } else {
+        this.darknessLabel.setStyle({
+          fontSize: '28px',
+          color: '#4a4a4a',
+          fontStyle: 'bold',
+          stroke: '',
+          strokeThickness: 0,
+          align: 'center',
+          lineSpacing: 0,
+        });
         this.darknessLabel.setText('암흑');
       }
     }
@@ -869,8 +910,10 @@ export class GameScene extends Phaser.Scene {
         );
         this.roomId = code;
         const s = this.roomSettings;
+        const isStunMode = s?.ruleMode === 'stun_penalty';
+        const budgetText = isStunMode ? '무제한 (스턴 모드)' : `${s?.catchBudget ?? 3}회`;
         const settingsLine = s
-          ? `\n설정  잡기 ${s.catchBudget}회 · ${Math.round(s.timeLimitMs / 1000)}초 · AI ${s.aiCount} · 여우 ${s.foxMode === 'designate' ? '지정' : '룰렛'}`
+          ? `\n설정  잡기 ${budgetText} · ${Math.round(s.timeLimitMs / 1000)}초 · AI ${s.aiCount} · 여우 ${s.foxMode === 'designate' ? '지정' : '룰렛'}`
           : '';
         this.statusText.setText(
           `방 코드 ${code} · 목록 또는 코드로 친구 초대${settingsLine}`,
@@ -1096,10 +1139,15 @@ export class GameScene extends Phaser.Scene {
       this.prepEndsAtMs = Date.now() + state.seekerPrepRemainingMs;
     }
 
-    const blind = this.seekerIsBlind(state, you);
-    this.prepOverlay.setVisible(blind);
-    this.prepLabel.setVisible(blind);
-    if (blind) {
+    // Prep overlay is strictly for the start-of-match seeker preparation countdown
+    const isPrep =
+      isSeekerPrepActive(state) &&
+      this.you != null &&
+      state.seekerId === this.you &&
+      this.prepRemainingForUi(state) > 0;
+    this.prepOverlay.setVisible(isPrep);
+    this.prepLabel.setVisible(isPrep);
+    if (isPrep) {
       const sec = Math.ceil(this.prepRemainingForUi(state) / 1000);
       this.prepLabel.setText(
         `준비 시간\n${sec}초 후 토끼가 보입니다\n지금은 움직일 수 없어요`,
@@ -1144,8 +1192,16 @@ export class GameScene extends Phaser.Scene {
       you != null &&
       (this.state.seekerId === you || this.state.practiceRole === 'fox');
     const isStunned = isFox && (this.state.seekerStunRemainingMs ?? 0) > 0;
+    const isBlind = you != null && this.seekerIsBlind(this.state, you);
     // Block local seeker input during prep or stun (host also rejects)
-    if (you && (this.seekerIsBlind(this.state, you) || isStunned)) {
+    if (you && (isBlind || isStunned)) {
+      if (this.lastMoveSent.dx !== 0 || this.lastMoveSent.dy !== 0) {
+        this.lastMoveSent = { dx: 0, dy: 0 };
+        this.sendIntent({ type: 'move', dx: 0, dy: 0 });
+      }
+      const mySpr = this.sprites.get(you);
+      const myBody = mySpr?.body as Phaser.Physics.Arcade.Body | null;
+      myBody?.setVelocity(0, 0);
       return;
     }
     const intents = this.inputCtl.poll();
